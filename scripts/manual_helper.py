@@ -660,6 +660,26 @@ def html_template_version() -> int:
     return version
 
 
+def html_on_disk_version(html_path: Path) -> int:
+    """Read the version marker from a user-generated HTML file on disk.
+
+    Mirrors html_template_version() but for the file the user/skill wrote
+    (e.g. <project>/docs/user-manual/user-manual.html), not the bundled
+    template. Use to decide whether regenerate_html_if_stale() will copy.
+
+    Raises FileNotFoundError if html_path is missing, ValueError if the file
+    exists but has no version marker.
+    """
+    if not html_path.exists():
+        raise FileNotFoundError(f"html file not found: {html_path}")
+    version = _read_html_version(html_path.read_text(encoding="utf-8"))
+    if version is None:
+        raise ValueError(
+            f"{html_path} has no <!-- user-manual-dashboard-version: N --> marker"
+        )
+    return version
+
+
 def regenerate_html_if_stale(html_path: Path) -> str:
     template_version = html_template_version()
     html_path.parent.mkdir(parents=True, exist_ok=True)
@@ -965,6 +985,23 @@ def main(argv: list[str]) -> int:
 
     if cmd == "html-template-version":
         print(html_template_version())
+        return 0
+
+    if cmd == "html-on-disk-version":
+        if len(argv) != 3:
+            print(
+                "usage: manual_helper.py html-on-disk-version <html-path>",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            print(html_on_disk_version(Path(argv[2])))
+        except FileNotFoundError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
         return 0
 
     if cmd == "regenerate-html-if-stale":

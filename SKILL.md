@@ -42,6 +42,17 @@ Both cases use the same routine; the existing-manual case skips artifacts whose 
 
 **本 skill 的设计原则**:5 个 helper 是 LLM 的"快速数据",不是"权威源"。LLM 拿到结构化数据后,合成的人类可读手册才是最终产物。
 
+## 0.6 示例项目(给 LLM agent 找参考)
+
+`examples/` 目录下有 4 个可直接拿来对照的实现,合成手册前应**先扫一眼**再下笔:
+
+| 文件 / 目录 | 用途 |
+|---|---|
+| [`examples/db-backend/`](./examples/db-backend/) | 完整可跑的 FastAPI + Postgres + S3/MinIO 后端,演示 db 模式(`init-db` / `upsert-manual` / `upload-asset`)的实际调用 |
+| [`examples/custom-helper/`](./examples/custom-helper/) | Tier 2/3 适配指南 + 可直接复制的 drop-in helper(Ant Design Vue / Django / Next.js / 等),含可跑 demo |
+| [`examples/dryrun-sys-user-manual.md`](./examples/dryrun-sys-user-manual.md) | **示范输出**:LLM 按 §2.8 风格干跑生成的一份完整 SYS 模块手册(参考最终长什么样) |
+| [`examples/personas.template.json`](./examples/personas.template.json) | personas.json 的最小模板,复制到目标项目填实际角色即可 |
+
 ## 1. 文件位置与产物形态
 
 - `<git-root>/docs/user-manual/manual-config.json` — 项目级配置(项目元信息 / build_commands / 业务目标 / inputs)

@@ -23,18 +23,47 @@
 
 ```
 user-manual/
-├── SKILL.md              # 完整执行规范(LLM agent 必读)
-├── INTEGRATION.md        # 与 superpowers 框架的集成说明
-├── scripts/              # 5 个抽取 helper + 单元测试
-│   └── legacy/           # 重构前备份(仅供考古)
-├── templates/            # user-manual.html 模板
-└── examples/             # 示例项目骨架(db-backend / custom-helper)
+├── SKILL.md              # 完整执行规范(LLM agent 必读,12 段)
+├── INTEGRATION.md        # 30 分钟首次接入指南
+├── CONTRIBUTING.md       # 改动流程 + 风格约束
+├── LICENSE               # MIT
+├── scripts/
+│   ├── extract-tasks.py        # 任务候选抽取(扫 superpowers specs)
+│   ├── extract-fields.py       # 表单字段(Vue Element Plus / naive-ui + JPA DTO)
+│   ├── extract-routes.py       # 前端路由(Vue Router 4)
+│   ├── extract-roles.py        # RBAC 角色权限(@PreAuthorize / v-permission)
+│   ├── extract-openapi.py      # OpenAPI 3.x 元数据(fallback)
+│   ├── manual_helper.py        # orchestrator,15 个子命令(SKILL.md §7)
+│   ├── validate-output.py      # 6 项必跑校验,失败阻断 commit
+│   ├── tests/                  # 33 个 stdlib unittest,无外部依赖
+│   └── legacy/                 # 重构前 .clean 备份(考古用,不要 import)
+├── templates/
+│   └── user-manual.html  # 自包含 dashboard(版本号:24)
+├── examples/
+│   ├── db-backend/       # 完整 FastAPI + Postgres + S3 例子
+│   ├── custom-helper/    # Tier 2 适配指南 + drop-in 代码片段
+│   ├── personas.template.json
+│   └── dryrun-sys-user-manual.md  # 示范输出(LLM 按 §2.8 干跑生成)
+└── .github/
+    └── workflows/test.yml  # CI:Python 3.10/3.11/3.12 跑 unittest
 ```
+
+## 跑测试
+
+```bash
+cd scripts
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+```
+
+CI 会在 push / PR 时自动跑同样的命令。
 
 ## 详细文档
 
 - **[SKILL.md](./SKILL.md)** — 完整的 skill 规范(给执行方 LLM 阅读)
 - **[INTEGRATION.md](./INTEGRATION.md)** — 与 superpowers 框架的集成
+- **[CONTRIBUTING.md](./CONTRIBUTING.md)** — 想改 helper / 加 CI / 升模板版本号看这里
+- **[examples/db-backend/](./examples/db-backend/)** — db 模式后端参考实现
+- **[examples/custom-helper/](./examples/custom-helper/)** — Tier 2/3 适配 recipe
 
 ## 触发词
 
