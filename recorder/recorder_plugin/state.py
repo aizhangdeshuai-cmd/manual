@@ -1,4 +1,8 @@
-"""Idempotency state: per-script JSON, atomic writes, flock for cross-process safety."""
+"""Idempotency state: per-script JSON, atomic writes, flock for cross-process safety.
+
+v1.1: also tracks named video sessions (e.g. "create-flow") so re-runs of the same
+script can skip already-completed video recording sessions.
+"""
 from __future__ import annotations
 import fcntl
 import json
@@ -43,15 +47,23 @@ def file_lock(lock_path: Path) -> Iterator[None]:
 class RecorderState:
     """Per-script idempotency state.
 
-    Stores: {step_idx: {input_hash, output_path, mtime, validated}}.
+    Stores:
+    - steps: {step_idx: {input_hash, output_path, mtime, validated}}
+    - video_sessions: {session_name: {output_path, validated, mtime}}  (v1.1)
+
     Re-run skips a step if its output_path exists and input_hash matches.
+    Re-run skips a video session if its output_path exists and is validated.
     """
 
     def __init__(self, output_dir: Path, script_name: str):
         self.output_dir = Path(output_dir)
         self.script_name = script_name
         self.path = self.output_dir / STATE_FILENAME
-        self._data: dict = {"script_name": script_name, "steps": {}}
+        self._data: dict = {
+            "script_name": script_name,
+            "steps": {},
+            "video_sessions": {},
+        }
         self._load()
 
     def _load(self) -> None:
@@ -59,9 +71,15 @@ class RecorderState:
             try:
                 with file_lock(self.path.with_suffix(".lock")):
                     self._data = json.loads(self.path.read_text())
+                # Ensure new sections exist for state files written by older versions
+                self._data.setdefault("steps", {})
+                self._data.setdefault("video_sessions", {})
             except (json.JSONDecodeError, OSError):
-                # Corrupt state: ignore, start fresh
-                self._data = {"script_name": self.script_name, "steps": {}}
+                self._data = {
+                    "script_name": self.script_name,
+                    "steps": {},
+                    "video_sessions": {},
+                }
 
     def _save(self) -> None:
         with file_lock(self.path.with_suffix(".lock")):
@@ -72,7 +90,7 @@ class RecorderState:
         path = Path(output_path)
         existing = self._data["steps"].get(str(step_idx))
         if path.exists() and existing and existing.get("input_hash") == input_hash:
-            return  # no-op: same hash, file exists
+            return
         self._data["steps"][str(step_idx)] = {
             "input_hash": input_hash,
             "output_path": str(path),
@@ -91,3 +109,26 @@ class RecorderState:
         if record["input_hash"] != input_hash:
             return False
         return Path(record["output_path"]).exists()
+
+    # v1.1: video session tracking
+
+    def set_video_session(self, name: str, output_path: Path, validated: bool) -> None:
+        from datetime import datetime, timezone
+        path = Path(output_path)
+        self._data["video_sessions"][name] = {
+            "output_path": str(path),
+            "validated": validated,
+            "mtime": datetime.now(timezone.utc).isoformat(),
+        }
+        self._save()
+
+    def is_video_session_valid(self, name: str) -> bool:
+        record = self._data.get("video_sessions", {}).get(name)
+        if not record:
+            return False
+        if not record.get("validated"):
+            return False
+        return Path(record["output_path"]).exists()
+
+    def get_video_session(self, name: str) -> dict | None:
+        return self._data.get("video_sessions", {}).get(name)

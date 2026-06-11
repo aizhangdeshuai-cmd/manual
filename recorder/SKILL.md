@@ -28,8 +28,11 @@ When the user-manual skill's LLM agent encounters a `[SCREENSHOT NEEDED]` or `[V
 
 ```bash
 # Verify the recorder is installed
-python3 -m recorder_plugin.cli --version    # → 0.1.0
+python3 -m recorder_plugin.cli --version    # → 0.2.0
 ffmpeg -version | head -1                    # → ffmpeg 4.4+
+
+# Optional: for AI annotation, set the API key
+export ANTHROPIC_API_KEY=sk-ant-...           # needed only for `ai_annotate` steps
 
 # Run an existing script
 python3 -m recorder_plugin.cli run examples/sample_script.json
@@ -39,8 +42,10 @@ python3 -m recorder_plugin.cli run examples/sample_script.json
 
 ## Script schema (declarative mode)
 
-See `examples/sample_script.json` for a complete example. The 11 step actions:
-`navigate`, `click`, `type`, `wait_for`, `screenshot`, `login`, `video_start`, `video_stop`, `set_viewport`, `set_retry_policy`.
+See `examples/sample_script.json` for a complete example. The 12 step actions:
+`navigate`, `click`, `type`, `wait_for`, `screenshot`, `login`, `video_start`, `video_stop`, `set_viewport`, `ai_annotate` (v1.1, requires `ANTHROPIC_API_KEY`).
+
+The `video_stop` step now produces a single MP4 (concat of N 10s webm slices) via `video.concat_slices_to_mp4`. State-tracked across re-runs: a script with the same name will skip the video session if it was already validated.
 
 ## MCP tools (imperative mode)
 

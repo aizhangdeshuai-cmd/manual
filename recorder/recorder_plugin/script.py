@@ -21,6 +21,7 @@ from recorder_plugin.video import slice_video
 ALLOWED_STEP_ACTIONS = {
     "navigate", "click", "type", "wait_for", "screenshot",
     "login", "video_start", "video_stop", "set_viewport",
+    "ai_annotate",  # v1.1
 }
 
 
@@ -104,6 +105,32 @@ async def _handle_login(rec: Recorder, step: dict, env: dict) -> bool:
     return await perform_login(rec, login)
 
 
+async def _handle_ai_annotate(
+    step: dict, output_dir: Path
+) -> AssetRef | None:
+    """v1.1: take a fresh screenshot, send to Claude vision, apply annotations.
+
+    The step may EITHER:
+    - Reference an existing screenshot by name: {"action": "ai_annotate", "screenshot": "01-list", "prompt": "..."}
+    - Take a fresh screenshot first: {"action": "ai_annotate", "name": "01-list", "prompt": "...", "fresh": true}
+
+    Returns the annotated AssetRef, or None if the source screenshot doesn't exist.
+    """
+    from recorder_plugin.vision import ai_annotate_and_save
+    prompt = step.get("prompt") or step.get("description") or "Find notable UI elements"
+    name = _to_kebab(step.get("screenshot") or step.get("name") or "ai-annotated")
+    src = output_dir / f"{name}.png"
+    if not src.exists():
+        return None
+    dst = output_dir / f"{name}.ai-annotated.png"
+    annotations = ai_annotate_and_save(src, prompt, dst)
+    return AssetRef(
+        path=dst, kind="screenshot", size_bytes=dst.stat().st_size,
+        annotated=True,
+        caption_hint=f"AI-annotated ({len(annotations)} boxes): {prompt[:30]}",
+    )
+
+
 async def _handle_video_start(rec: Recorder, step: dict, name_to_path: dict) -> None:
     # v1: recording is started by Recorder() with record_video_dir. We just remember the name.
     name = _to_kebab(step["name"])
@@ -113,23 +140,39 @@ async def _handle_video_start(rec: Recorder, step: dict, name_to_path: dict) -> 
 async def _handle_video_stop(
     rec: Recorder, step: dict, name_to_path: dict, output_dir: Path
 ) -> AssetRef:
+    """v1.1: slice the recorded webm, concat into one MP4, return reference.
+
+    The MP4 is the new canonical asset; individual slices are still kept for reference.
+    """
+    from recorder_plugin.video import concat_slices_to_mp4, validate_slice, get_video_info
     name = _to_kebab(step["name"])
     rec_dir = rec.record_video_dir
     if not rec_dir:
-        return AssetRef(path=output_dir / f"{name}.webm", kind="video_slice", size_bytes=0)
+        return AssetRef(path=output_dir / f"{name}.mp4", kind="video_slice", size_bytes=0)
     webms = sorted(rec_dir.glob("*.webm"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not webms:
-        return AssetRef(path=output_dir / f"{name}.webm", kind="video_slice", size_bytes=0)
+        return AssetRef(path=output_dir / f"{name}.mp4", kind="video_slice", size_bytes=0)
     src = webms[0]
     target_dir = output_dir / name
     target_dir.mkdir(parents=True, exist_ok=True)
     slices = slice_video(src, target_dir, slice_seconds=10)
     if not slices:
         return AssetRef(path=src, kind="video_slice", size_bytes=src.stat().st_size)
-    # Validate first slice
-    from recorder_plugin.video import validate_slice
     if not validate_slice(slices[0]):
         return AssetRef(path=slices[0], kind="video_slice", size_bytes=slices[0].stat().st_size)
+    # v1.1: concat all valid slices into one MP4
+    valid_slices = [s for s in slices if validate_slice(s)]
+    if valid_slices:
+        mp4_path = target_dir / f"{name}.mp4"
+        try:
+            concat_slices_to_mp4(valid_slices, mp4_path, audio=False)
+            return AssetRef(
+                path=mp4_path, kind="video_slice",
+                size_bytes=mp4_path.stat().st_size, slice_index=0,
+                extra={"duration_s": get_video_info(mp4_path)["duration_s"]},
+            )
+        except Exception:
+            pass  # fall through to first slice
     return AssetRef(
         path=slices[0], kind="video_slice",
         size_bytes=slices[0].stat().st_size, slice_index=0,
@@ -208,11 +251,44 @@ async def run_script(script_path: Path) -> dict:
                 elif action == "video_start":
                     await _handle_video_start(rec, step, name_to_path)
                 elif action == "video_stop":
+                    # v1.1: cross-process resume — if the state already has a
+                    # validated session for this name, reuse it instead of re-recording.
+                    name = _to_kebab(step["name"])
+                    if state.is_video_session_valid(name):
+                        existing = state.get_video_session(name)
+                        asset = AssetRef(
+                            path=Path(existing["output_path"]),
+                            kind="video_slice",
+                            size_bytes=0,
+                            slice_index=0,
+                            extra={"reused": True},
+                        )
+                        asset_dict = asset.to_dict()
+                        asset_dict["step"] = i
+                        asset_dict["name"] = name
+                        videos.append(asset_dict)
+                        skipped_steps.append({
+                            "step": i, "action": "video_stop",
+                            "reason": "video session already validated; reused",
+                        })
+                        continue
                     asset = await _handle_video_stop(rec, step, name_to_path, output_dir)
                     asset_dict = asset.to_dict()
                     asset_dict["step"] = i
-                    asset_dict["name"] = _to_kebab(step["name"])
+                    asset_dict["name"] = name
                     videos.append(asset_dict)
+                    state.set_video_session(name, asset.path, validated=True)
+                elif action == "ai_annotate":
+                    asset = await _handle_ai_annotate(step, output_dir)
+                    if asset is None:
+                        errors.append({
+                            "step": i, "action": "ai_annotate",
+                            "error": f"source screenshot not found: {step.get('screenshot') or step.get('name')}",
+                        })
+                    else:
+                        asset_dict = asset.to_dict()
+                        asset_dict["step"] = i
+                        screenshots.append(asset_dict)
             except Exception as e:
                 errors.append({"step": i, "action": action, "error": str(e)})
                 if data.get("fail_fast"):
