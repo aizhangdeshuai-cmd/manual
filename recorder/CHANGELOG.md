@@ -19,6 +19,8 @@ v1.1 release. Adds three v1-deferred features from spec §13:
 
 Test count: 78 (was 49 in v0.1.0; +29 new tests across `test_video`, `test_state`, `test_vision`).
 
+**Verification gap (CI):** The `recorder-ci.yml` workflow is committed and pushed, but the repo is private on GitHub. The CI status could not be programmatically verified from outside (no `gh` auth). The user should check `https://github.com/aizhangdeshuai-cmd/manual/actions` directly. Local test suite: **78/78 passing**.
+
 ## 0.1.0 (2026-06-11)
 
 Initial release. See `docs/superpowers/specs/2026-06-11-recorder-skill-design.md` for full design.
