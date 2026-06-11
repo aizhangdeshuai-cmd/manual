@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Extract role/permission references from backend Java + frontend Vue code.
+
+Usage:
+  extract-roles.py <backend-root> [<frontend-root>]
+
+Output: JSON array of {role_name, source, framework, example_path}.
+
+Backend (Java) patterns:
+  - @PreAuthorize("hasRole('X')") / hasAnyRole
+  - @PreAuthorize("hasAuthority('X')") / hasAnyAuthority
+  - @Secured({"X", "Y"})
+  - @RolesAllowed({"X"})
+  - @RequiresPermissions("X")
+
+Frontend (Vue) patterns:
+  - v-permission="['X', 'Y']" / v-permission="'X'"
+  - v-role="'X'" / v-role="['X']"
+  - <RoleGuard :roles="['X']">
+  - v-has-permission="'X'"
+"""
+from __future__ import annotations
+import json
+import re
+import sys
+from pathlib import Path
+
+
+# Java: top-level annotation capture. We capture the full argument string
+# (everything between the outer parens' quotes) and then post-process to
+# extract role names.
+JAVA_ANNOTATIONS = [
+    (re.compile(r'@PreAuthorize\s*\(\s*"([^"]*)"'), "java:PreAuthorize"),
+    (re.compile(r'@PreAuthorize\s*\(\s*\'([^\']*)\''), "java:PreAuthorize"),
+    (re.compile(r'@Secured\s*\(\s*"([^"]*)"'), "java:Secured"),
+    (re.compile(r'@Secured\s*\(\s*\'([^\']*)\''), "java:Secured"),
+    (re.compile(r'@RolesAllowed\s*\(\s*"([^"]*)"'), "java:RolesAllowed"),
+    (re.compile(r'@RolesAllowed\s*\(\s*\'([^\']*)\''), "java:RolesAllowed"),
+    (re.compile(r'@RequiresPermissions\s*\(\s*"([^"]*)"'), "java:RequiresPermissions"),
+]
+
+# Within a captured argument, extract quoted strings (role/authority names)
+QUOTED_STRINGS_RE = re.compile(r"""['"]([^'"]+)['"]""")
+
+# Match: hasRole('X') / hasAnyRole('X', 'Y') etc.
+HAS_ROLE_RE = re.compile(r'has(?:Any)?(?:Role|Authority)\s*\(\s*([^)]+?)\s*\)')
+
+# Match: {"X", "Y"}  (array literal in @Secured / @RolesAllowed)
+ARRAY_LITERAL_RE = re.compile(r'\{\s*([^}]+)\s*\}')
+
+
+def _extract_quoted(text: str) -> list[str]:
+    return [m.group(1) for m in QUOTED_STRINGS_RE.finditer(text)]
+
+
+def _extract_from_arg(arg: str) -> list[str]:
+    """Given the inner string of a Java annotation, return role names."""
+    # Try hasRole/hasAuthority first
+    out: list[str] = []
+    m = HAS_ROLE_RE.search(arg)
+    if m:
+        out.extend(_extract_quoted(m.group(1)))
+    # Try array literal
+    a = ARRAY_LITERAL_RE.search(arg)
+    if a:
+        out.extend(_extract_quoted(a.group(1)))
+    # Fallback: if no hasRole/array but arg itself is a quoted string, take it
+    if not out and arg.strip().startswith(("'", '"')) and arg.strip().endswith(("'", '"')):
+        out.extend(_extract_quoted(arg))
+    # Final fallback: treat the whole arg as a single role name (handles @Secured("AUDITOR"))
+    if not out and re.match(r"^[A-Za-z0-9_:.-]+$", arg.strip()):
+        out.append(arg.strip())
+    return out
+
+
+def extract_from_java(root: Path) -> list[dict]:
+    roles: dict[str, dict] = {}
+    if not root.exists():
+        return []
+    for f in root.rglob("*.java"):
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for pat, framework in JAVA_ANNOTATIONS:
+            for m in pat.finditer(text):
+                arg = m.group(1)
+                for role_name in _extract_from_arg(arg):
+                    if role_name not in roles:
+                        roles[role_name] = {
+                            "role_name": role_name,
+                            "source": str(f),
+                            "framework": framework,
+                            "example_path": None,
+                        }
+    return list(roles.values())
+
+
+# Vue patterns
+VUE_PATTERNS = [
+    (re.compile(r'v-permission\s*=\s*"\[([^\]]+)\]"'), "vue:v-permission"),
+    (re.compile(r'v-permission\s*=\s*\'\[([^\]]+)\]\''), "vue:v-permission"),
+    (re.compile(r'v-permission\s*=\s*"([^"]+)"'), "vue:v-permission"),
+    (re.compile(r'v-permission\s*=\s*\'([^\']+)\''), "vue:v-permission"),
+    (re.compile(r'v-role\s*=\s*"\[([^\]]+)\]"'), "vue:v-role"),
+    (re.compile(r'v-role\s*=\s*\'\[([^\]]+)\]\''), "vue:v-role"),
+    (re.compile(r'v-role\s*=\s*"([^"]+)"'), "vue:v-role"),
+    (re.compile(r'v-role\s*=\s*\'([^\']+)\''), "vue:v-role"),
+    (re.compile(r'<RoleGuard[^>]*:roles\s*=\s*"\[([^\]]+)\]"'), "vue:RoleGuard"),
+    (re.compile(r'<RoleGuard[^>]*:roles\s*=\s*\'\[([^\]]+)\]\''), "vue:RoleGuard"),
+    (re.compile(r'v-has-permission\s*=\s*"([^"]+)"'), "vue:v-has-permission"),
+    (re.compile(r'v-has-permission\s*=\s*\'([^\']+)\''), "vue:v-has-permission"),
+]
+
+
+def extract_from_vue(root: Path) -> list[dict]:
+    roles: dict[str, dict] = {}
+    if not root.exists():
+        return []
+    for f in root.rglob("*.vue"):
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for pat, framework in VUE_PATTERNS:
+            for m in pat.finditer(text):
+                raw = m.group(1)
+                # Always extract quoted strings; handles both "X" and ["X","Y"] uniformly
+                extracted = _extract_quoted(raw) if ("," in raw or raw.startswith(("[", "["))) else [raw.strip().strip(chr(39)+chr(34))]
+                for role_name in extracted:
+                    if role_name and role_name not in roles:
+                        roles[role_name] = {"role_name": role_name, "source": str(f), "framework": framework, "example_path": None}
+    return list(roles.values())
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in ("-h", "--help"):
+        print("usage: extract-roles.py <backend-root> [<frontend-root>]", file=sys.stderr)
+        return 0
+    backend = Path(argv[0]) if argv else None
+    frontend = Path(argv[1]) if len(argv) > 1 else None
+
+    out: list[dict] = []
+    if backend:
+        out.extend(extract_from_java(backend))
+    if frontend:
+        out.extend(extract_from_vue(frontend))
+    for r in out:
+        r["example_path"] = r["source"]
+    json.dump(out, sys.stdout, ensure_ascii=False, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

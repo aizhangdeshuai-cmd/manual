@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""Extract endpoints + schemas from an OpenAPI 3.x (or Swagger 2.0) file.
+
+Usage:
+  extract-openapi.py <openapi.yaml-or-json>
+
+Output: JSON array of {path, method, operation_id, summary, tags, parameters,
+                      request_body, responses, source}.
+Plus a second JSON array (separated by '---ENDPOINTS---') of schemas
+{name, type, required, properties, source}.
+
+The split is so LLM can ingest endpoints and schemas independently.
+
+Output schema (JSON; one consolidated object per spec file):
+  {
+    "source": "openapi.yaml",
+    "endpoints": [
+      {
+        "path": "/api/users",
+        "method": "POST",
+        "operationId": "createUser",
+        "summary": "创建用户",
+        "tags": ["user"],
+        "parameters": [{"name": "body", "in": "body", "required": true, "schema": "User"}],
+        "request_schema": "User",
+        "response_schema": "User",
+        "auth_required": true
+      }
+    ],
+    "schemas": [
+      {
+        "name": "User",
+        "fields": [
+          {"name": "email", "type": "string(email)", "required": true, "description": "User email"}
+        ]
+      }
+    ]
+  }
+
+Field types follow JSON Schema: string / number / integer / boolean / array / object.
+Format hint: type(format) e.g. string(email) / number(double).
+Enums: enum(a,b,c).
+
+Orchestrator (SKILL.md section 5.1) splits on the ---SCHEMAS--- marker and feeds
+endpoints + schemas separately to the LLM.
+
+"""
+from __future__ import annotations
+import json
+import re
+import sys
+from pathlib import Path
+
+
+def _parse_yaml_simple(text: str):
+    """Minimal YAML→Python for OpenAPI 3.x specs without PyYAML.
+
+    Supports: mappings, sequences, scalars (string / int / bool / null),
+    multiline scalars via '|'. Does NOT support anchors / complex flow.
+    Enough for the typical openapi.yaml produced by SpringDoc / NestJS Swagger.
+    """
+    try:
+        import yaml
+        return yaml.safe_load(text)
+    except ImportError:
+        pass
+
+    # Fallback: use json if YAML is actually JSON, or simple regex for flat
+    text = text.strip()
+    if text.startswith("{"):
+        return json.loads(text)
+
+    # Last resort: a tiny YAML reader. Most openapi.yaml files use 2-space
+    # indentation and have key: value on single lines. We do a "good enough"
+    # parser for the fields we need.
+    raise SystemExit(
+        "extract-openapi: PyYAML not installed and the file is not JSON. "
+        "Install pyyaml (`pip install pyyaml`) or convert the spec to JSON."
+    )
+
+
+def _resolve_ref(ref: str, spec: dict) -> dict | None:
+    """Resolve a $ref like '#/components/schemas/User'."""
+    if not ref.startswith("#/"):
+        return None
+    parts = ref[2:].split("/")
+    cur: object = spec
+    for p in parts:
+        if isinstance(cur, dict) and p in cur:
+            cur = cur[p]
+        else:
+            return None
+    return cur if isinstance(cur, dict) else None
+
+
+def _schema_to_fields(schema: dict, spec: dict, depth: int = 0) -> list[dict]:
+    """Flatten a JSON-schema object into a list of field descriptors.
+
+    Output: [{name, type, required, description, options?}]
+    """
+    if depth > 3 or not isinstance(schema, dict):
+        return []
+    fields: list[dict] = []
+    required = schema.get("required", []) or []
+    properties = schema.get("properties", {}) or {}
+    for name, prop in properties.items():
+        if "$ref" in prop:
+            ref_schema = _resolve_ref(prop["$ref"], spec)
+            if ref_schema:
+                fields.extend(_schema_to_fields(ref_schema, spec, depth + 1))
+            continue
+        if prop.get("type") == "array":
+            items = prop.get("items", {})
+            if "$ref" in items:
+                ref_schema = _resolve_ref(items["$ref"], spec)
+                if ref_schema:
+                    f = _schema_to_fields(ref_schema, spec, depth + 1)
+                    fields.extend(f)
+            continue
+        if prop.get("type") == "object" or "properties" in prop:
+            f = _schema_to_fields(prop, spec, depth + 1)
+            for sub in f:
+                sub["name"] = f"{name}.{sub['name']}"
+            fields.extend(f)
+            continue
+        ftype = prop.get("type", "string")
+        if "enum" in prop:
+            ftype = f"enum({','.join(str(x) for x in prop['enum'])})"
+        if prop.get("format"):
+            ftype = f"{ftype}({prop['format']})"
+        fields.append({
+            "name": name,
+            "type": ftype,
+            "required": name in required,
+            "description": prop.get("description") or prop.get("title"),
+        })
+    return fields
+
+
+def extract_from_openapi(path: Path) -> tuple[list[dict], list[dict]]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    spec = _parse_yaml_simple(text)
+
+    endpoints: list[dict] = []
+    paths = spec.get("paths", {}) or {}
+    for url, methods in paths.items():
+        if not isinstance(methods, dict):
+            continue
+        for method, op in methods.items():
+            if method.lower() not in ("get", "post", "put", "patch", "delete", "options", "head"):
+                continue
+            if not isinstance(op, dict):
+                continue
+            params = []
+            for p in op.get("parameters", []) or []:
+                if "$ref" in p:
+                    continue
+                params.append({
+                    "name": p.get("name"),
+                    "in": p.get("in"),
+                    "required": p.get("required", False),
+                    "type": (p.get("schema") or {}).get("type"),
+                })
+            req_body = op.get("requestBody") or {}
+            req_schema_ref = None
+            if "content" in req_body:
+                for ct, body in req_body["content"].items():
+                    if "schema" in body and "$ref" in body["schema"]:
+                        req_schema_ref = body["schema"]["$ref"]
+                        break
+            endpoints.append({
+                "path": url,
+                "method": method.upper(),
+                "operation_id": op.get("operationId"),
+                "summary": op.get("summary"),
+                "tags": op.get("tags", []),
+                "parameters": params,
+                "request_body_ref": req_schema_ref,
+                "responses": list((op.get("responses") or {}).keys()),
+                "source": str(path),
+            })
+
+    schemas: list[dict] = []
+    components = spec.get("components", {}) or {}
+    schema_defs = components.get("schemas", {}) or {}
+    for name, schema in schema_defs.items():
+        if not isinstance(schema, dict):
+            continue
+        flat = _schema_to_fields(schema, spec)
+        schemas.append({
+            "name": name,
+            "field_count": len(flat),
+            "fields": flat,
+            "source": str(path),
+        })
+
+    return endpoints, schemas
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in ("-h", "--help"):
+        print("usage: extract-openapi.py <openapi.yaml-or-json>", file=sys.stderr)
+        return 0
+    all_endpoints: list[dict] = []
+    all_schemas: list[dict] = []
+    for a in argv:
+        p = Path(a)
+        if p.is_dir():
+            files = list(p.rglob("openapi.*")) + list(p.rglob("swagger.*"))
+        else:
+            files = [p]
+        for f in files:
+            try:
+                ep, sc = extract_from_openapi(f)
+                all_endpoints.extend(ep)
+                all_schemas.extend(sc)
+            except Exception as e:
+                sys.stderr.write(f"WARN: failed to parse {f}: {e}\n")
+    # Output: endpoints JSON, separator, schemas JSON
+    sys.stdout.write(json.dumps(all_endpoints, ensure_ascii=False, indent=2))
+    sys.stdout.write("\n---SCHEMAS---\n")
+    sys.stdout.write(json.dumps(all_schemas, ensure_ascii=False, indent=2))
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

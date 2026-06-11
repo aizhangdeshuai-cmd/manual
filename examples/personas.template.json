@@ -1,0 +1,89 @@
+{
+  "_comment": "Domain-neutral personas template. Copy to docs/user-manual/personas.json, then edit for your project. All fields except _comment are required. See SKILL.md section 1 + 5 for usage.",
+  "granularity": "role_with_tasks",
+  "_granularity_help": "One of: role_only | task_only | role_with_tasks (default). role_with_tasks generates the richest task cards.",
+  "personas": [
+    {
+      "id": "operator",
+      "name": "运营人员",
+      "description": "日常使用系统完成业务操作的一线人员,关注操作效率和准确率。",
+      "daily_tasks": [
+        "查看自己的待办任务",
+        "录入新的业务数据",
+        "查询历史记录并导出报表"
+      ],
+      "pain_points": [
+        "找不到常用功能入口",
+        "导出格式不兼容下游系统",
+        "批量操作步骤繁琐"
+      ],
+      "covers_objectives": ["创建", "查询", "导出"],
+      "_covers_objectives_help": "List of business_objectives (from manual-config.json) this persona covers. Aggregate across all personas must span >= 2 distinct values, else validate-config fails."
+    },
+    {
+      "id": "specialist",
+      "name": "业务专员",
+      "description": "负责某个业务域的深度工作,有审批 / 配置权限,处理异常情况。",
+      "daily_tasks": [
+        "审核下属提交的申请",
+        "配置业务规则和参数",
+        "处理异常工单"
+      ],
+      "pain_points": [
+        "审批流配置复杂",
+        "异常情况需要联系多个支持团队"
+      ],
+      "covers_objectives": ["审批", "修改", "查询"]
+    },
+    {
+      "id": "manager",
+      "name": "业务主管",
+      "description": "团队负责人,关注整体运营指标和下属工作进展,有查询和导出权限。",
+      "daily_tasks": [
+        "查看团队运营报表",
+        "审批重要业务决策",
+        "导出数据给上级部门"
+      ],
+      "pain_points": [
+        "报表口径不统一",
+        "审批流跨多个角色"
+      ],
+      "covers_objectives": ["查询", "审批", "导出"]
+    },
+    {
+      "id": "auditor",
+      "name": "审计 / 合规人员",
+      "description": "只读访问,需要导出全量数据进行审计,关注操作日志。",
+      "daily_tasks": [
+        "导出审计期间的全量数据",
+        "查看操作日志",
+        "核对业务规则配置"
+      ],
+      "pain_points": [
+        "操作日志查询性能慢",
+        "导出数据缺少关键字段"
+      ],
+      "covers_objectives": ["查询", "导出"]
+    },
+    {
+      "id": "external_collaborator",
+      "name": "外部协作者",
+      "description": "外聘律师 / 供应商接口人 / 审计机构等,通常只有部分数据的只读权限。",
+      "daily_tasks": [
+        "查看授权范围内的数据",
+        "提交补充材料"
+      ],
+      "pain_points": [
+        "权限边界不清晰",
+        "提交材料格式有特殊要求"
+      ],
+      "covers_objectives": ["查询", "创建"]
+    }
+  ],
+  "_validation_rules": [
+    "personas length >= 3 (validate-config error if fewer)",
+    "each persona must have id, name, daily_tasks (>= 1 entry)",
+    "aggregate covers_objectives across all personas must span >= 2 distinct values from manual-config.json business_objectives",
+    "persona.id must match role names extractable from code (extract-roles.py) when RBAC is enabled; otherwise validate-config warns"
+  ]
+}
