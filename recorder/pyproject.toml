@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "user-manual-recorder"
+version = "0.1.0"
+description = "Opt-in recorder plugin for the user-manual skill"
+requires-python = ">=3.10"
+dependencies = [
+    "playwright>=1.40,<2.0",
+    "Pillow>=10.0",
+    "mcp>=1.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0", "pytest-asyncio>=0.21"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

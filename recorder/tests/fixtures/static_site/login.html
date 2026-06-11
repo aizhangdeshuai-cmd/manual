@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Login</title><link rel="stylesheet" href="styles.css"></head>
+<body>
+  <main>
+    <h1>Login</h1>
+    <form id="login-form" data-testid="login-form">
+      <label>User <input name="user" data-testid="user-field"></label>
+      <label>Pass <input name="pass" type="password" data-testid="pass-field"></label>
+      <label>TOTP <input name="totp" data-testid="totp-field"></label>
+      <button type="submit" data-testid="login-submit">Sign in</button>
+    </form>
+    <div id="login-error" data-testid="login-error" style="display:none">Invalid credentials</div>
+  </main>
+  <script>
+    document.getElementById('login-form').addEventListener('submit', function(e) {
+      e.preventDefault();
+      var u = document.querySelector('[name="user"]').value;
+      var p = document.querySelector('[name="pass"]').value;
+      var t = document.querySelector('[name="totp"]').value;
+      if (u === 'testuser' && p === 'testpass' && /^\d{6}$/.test(t)) {
+        document.body.setAttribute('data-logged-in', 'true');
+        document.getElementById('login-error').style.display = 'none';
+      } else {
+        document.getElementById('login-error').style.display = 'block';
+      }
+    });
+  </script>
+  <div data-testid="shadow-host"></div>
+  <script>
+    var host = document.querySelector('[data-testid="shadow-host"]');
+    var root = host.attachShadow({mode: 'open'});
+    root.innerHTML = '<button data-testid="shadow-button">Shadow Button</button>';
+  </script>
+</body>
+</html>

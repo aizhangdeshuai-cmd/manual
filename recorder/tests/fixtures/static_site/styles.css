@@ -1,0 +1,6 @@
+body { font-family: -apple-system, sans-serif; max-width: 800px; margin: 2em auto; }
+nav { border-bottom: 1px solid #ccc; padding-bottom: 0.5em; }
+nav a { margin-right: 1em; }
+button.primary { background: #0066cc; color: white; padding: 0.5em 1em; border: 0; }
+iframe { border: 1px solid #ccc; }
+[data-logged-in] main h1::after { content: ' (logged in)'; color: green; }

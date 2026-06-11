@@ -11,3 +11,7 @@ __pycache__/
 .vscode/
 .env
 .env.local
+# recorder plugin
+recorder/.recorder_state.json
+recorder/tests/fixtures/static_site/uploads/
+*.auth.json
