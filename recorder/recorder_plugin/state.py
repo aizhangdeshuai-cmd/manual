@@ -1,0 +1,93 @@
+"""Idempotency state: per-script JSON, atomic writes, flock for cross-process safety."""
+from __future__ import annotations
+import fcntl
+import json
+import os
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator
+
+STATE_FILENAME = ".recorder_state.json"
+
+
+def atomic_write_json(path: Path, data: dict) -> None:
+    """Write JSON atomically: write to .tmp, then os.replace."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".tmp_state_", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+        os.replace(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
+
+
+@contextmanager
+def file_lock(lock_path: Path) -> Iterator[None]:
+    """Acquire an exclusive flock on `lock_path`. Releases on context exit."""
+    lock_path = Path(lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+class RecorderState:
+    """Per-script idempotency state.
+
+    Stores: {step_idx: {input_hash, output_path, mtime, validated}}.
+    Re-run skips a step if its output_path exists and input_hash matches.
+    """
+
+    def __init__(self, output_dir: Path, script_name: str):
+        self.output_dir = Path(output_dir)
+        self.script_name = script_name
+        self.path = self.output_dir / STATE_FILENAME
+        self._data: dict = {"script_name": script_name, "steps": {}}
+        self._load()
+
+    def _load(self) -> None:
+        if self.path.exists():
+            try:
+                with file_lock(self.path.with_suffix(".lock")):
+                    self._data = json.loads(self.path.read_text())
+            except (json.JSONDecodeError, OSError):
+                # Corrupt state: ignore, start fresh
+                self._data = {"script_name": self.script_name, "steps": {}}
+
+    def _save(self) -> None:
+        with file_lock(self.path.with_suffix(".lock")):
+            atomic_write_json(self.path, self._data)
+
+    def set_step(self, step_idx: int, input_hash: str, output_path: Path, validated: bool) -> None:
+        from datetime import datetime, timezone
+        path = Path(output_path)
+        existing = self._data["steps"].get(str(step_idx))
+        if path.exists() and existing and existing.get("input_hash") == input_hash:
+            return  # no-op: same hash, file exists
+        self._data["steps"][str(step_idx)] = {
+            "input_hash": input_hash,
+            "output_path": str(path),
+            "mtime": datetime.now(timezone.utc).isoformat(),
+            "validated": validated,
+        }
+        self._save()
+
+    def get_step(self, step_idx: int) -> dict | None:
+        return self._data["steps"].get(str(step_idx))
+
+    def is_step_valid(self, step_idx: int, input_hash: str) -> bool:
+        record = self.get_step(step_idx)
+        if not record:
+            return False
+        if record["input_hash"] != input_hash:
+            return False
+        return Path(record["output_path"]).exists()

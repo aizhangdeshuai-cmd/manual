@@ -75,12 +75,29 @@ to rebuild the standalone version (see `build_standalone()` in
 
 - **Stdlib only.** No `requests`, no `pydantic`, no `pytest`. The skill
   must work in any Python 3.10+ environment with zero `pip install`.
+  **Exception:** top-level opt-in plugin directories (see next section) may
+  declare their own dependencies.
 - **Type hints everywhere** (function signatures at minimum).
 - **Match the existing structure** of the file you are editing — do not
   refactor or "modernize" adjacent code in the same PR. Surgical changes
   are easier to review and revert.
 - **No comments explaining what the code does** (the code does that).
   Comments are for non-obvious *why* (hidden constraints, workarounds).
+
+## Opt-in plugins
+
+A top-level directory (e.g. `recorder/`) may declare its own dependencies
+in its own `pyproject.toml` and ship its own `.github/workflows/<name>-ci.yml`.
+The plugin's CI runs in a separate job and is opt-in: maintainers may
+disable it for a release if the plugin is broken.
+
+The plugin's `INSTALL.md` must list every pip package and system binary
+it requires. The plugin's `SKILL.md` frontmatter must declare it as
+`requires: [user-manual]` so the parent user-manual skill knows it is
+optional.
+
+The `stdlib only` style constraint above applies to files under `scripts/`,
+not to opt-in plugin directories.
 
 ## Commit messages
 
