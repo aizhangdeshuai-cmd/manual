@@ -18,8 +18,6 @@ few primitives that are easy to get wrong in prose:
   * `extract-routes <router-file>`      — run scripts/extract-routes.py.
   * `extract-roles <be> [<fe>]`         — run scripts/extract-roles.py.
   * `extract-openapi <openapi-file>`    — run scripts/extract-openapi.py (D3).
-                                          write default manual-config.json (file mode) and an empty
-                                          manual-index.json. Idempotent. Run once per project.
   * `scan-artifacts <project-root>`   — list every superpowers artifact with a
                                         sha256 of its content (JSON to stdout)
   * `parse-citations <md-path>`       — read the existing manual's Citations
@@ -888,9 +886,9 @@ def cmd_extract_openapi(args):
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 2:
-        print(__doc__, file=sys.stderr)
-        return 2
+    if len(argv) < 2 or argv[1] in ("--help", "-h", "help"):
+        print(__doc__)
+        return 0 if len(argv) >= 2 else 2
 
     cmd = argv[1]
 

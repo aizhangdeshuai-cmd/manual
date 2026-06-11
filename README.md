@@ -36,7 +36,6 @@ user-manual/
 │   ├── manual_helper.py        # orchestrator,15 个子命令(SKILL.md §7)
 │   ├── validate-output.py      # 6 项必跑校验,失败阻断 commit
 │   ├── tests/                  # 33 个 stdlib unittest,无外部依赖
-│   └── legacy/                 # 重构前 .clean 备份(考古用,不要 import)
 ├── templates/
 │   └── user-manual.html  # 自包含 dashboard(版本号:24)
 ├── examples/

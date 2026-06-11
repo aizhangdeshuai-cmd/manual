@@ -14,7 +14,6 @@ scripts/
   manual_helper.py  # orchestrator, 15 subcommands (see SKILL.md §7)
   validate-output.py# 6 must-pass checks before commit
   tests/            # 27 stdlib unittest tests, no external deps
-  legacy/           # pre-refactor backups — DO NOT import
 templates/
   user-manual.html  # self-contained dashboard (version-tagged)
 examples/
