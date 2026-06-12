@@ -547,6 +547,169 @@ class RecordManualTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertIn("usage: record-manual", r.stderr)
 
+    # === v0.3.0: mapping alt field ===
+
+    def test_apply_mapping_dict_value_uses_explicit_alt_text(self):
+        """v0.3.0: mapping value can be `{path, alt}` dict. The alt
+        field is what appears inside `![alt](path)` so screen readers
+        read human text, not kebab-case identifiers."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write("# Manual\n[SCREENSHOT: 01-list.png]\n")
+            md = f.name
+        try:
+            mapping_path = md + ".mapping.json"
+            try:
+                Path(mapping_path).write_text(json.dumps({
+                    "01-list": {
+                        "path": "screenshots/01-list.png",
+                        "alt": "任务列表页（带分页器）",
+                    },
+                }))
+                r = run(["record-manual", md, "--apply-mapping", mapping_path])
+                self.assertEqual(r.returncode, 0, msg=r.stderr)
+                new_text = Path(md).read_text()
+                # Alt text appears in the ![...](path) markdown
+                self.assertIn("![任务列表页（带分页器）](screenshots/01-list.png)", new_text)
+                # The kebab-case key does NOT appear as alt anymore
+                self.assertNotIn("![01-list]", new_text)
+            finally:
+                if os.path.exists(mapping_path):
+                    os.unlink(mapping_path)
+        finally:
+            os.unlink(md)
+
+    def test_apply_mapping_dict_value_without_alt_falls_back_to_key(self):
+        """v0.3.0: dict form without explicit `alt` falls back to the
+        mapping key (preserves v0.2.x behavior — no migration needed
+        for dict-form mappings that want the old alt-as-key default)."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write("# Manual\n[SCREENSHOT: hero.png]\n")
+            md = f.name
+        try:
+            mapping_path = md + ".mapping.json"
+            try:
+                Path(mapping_path).write_text(json.dumps({
+                    "hero": {"path": "screenshots/hero.png"},  # no alt
+                }))
+                r = run(["record-manual", md, "--apply-mapping", mapping_path])
+                self.assertEqual(r.returncode, 0, msg=r.stderr)
+                new_text = Path(md).read_text()
+                # Fallback to key
+                self.assertIn("![hero](screenshots/hero.png)", new_text)
+            finally:
+                if os.path.exists(mapping_path):
+                    os.unlink(mapping_path)
+        finally:
+            os.unlink(md)
+
+    def test_apply_mapping_dict_value_with_ai_annotated_prefix_uses_alt(self):
+        """v0.3.0: the alt field works for AI ANNOTATE entries too
+        (the `ai-annotated-<name>` key) — alt is independent of
+        whether the entry is for raw or AI-annotated screenshots."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write("# Manual\n[AI ANNOTATE: 01-list]\n")
+            md = f.name
+        try:
+            mapping_path = md + ".mapping.json"
+            try:
+                Path(mapping_path).write_text(json.dumps({
+                    "ai-annotated-01-list": {
+                        "path": "screenshots/01-list.ai-annotated.png",
+                        "alt": "任务列表页（带 AI 红框标注）",
+                    },
+                }))
+                r = run(["record-manual", md, "--apply-mapping", mapping_path])
+                self.assertEqual(r.returncode, 0, msg=r.stderr)
+                new_text = Path(md).read_text()
+                self.assertIn(
+                    "![任务列表页（带 AI 红框标注）](screenshots/01-list.ai-annotated.png)",
+                    new_text,
+                )
+            finally:
+                if os.path.exists(mapping_path):
+                    os.unlink(mapping_path)
+        finally:
+            os.unlink(md)
+
+    def test_apply_mapping_string_value_still_works_v030(self):
+        """v0.3.0 backward compat: string values (v0.2.x format) still
+        produce `![key](path)` — no migration required for existing
+        mapping files."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write("# Manual\n[SCREENSHOT: legacy.png]\n")
+            md = f.name
+        try:
+            mapping_path = md + ".mapping.json"
+            try:
+                Path(mapping_path).write_text(json.dumps({
+                    "legacy": "screenshots/legacy.png",  # v0.2.x format
+                }))
+                r = run(["record-manual", md, "--apply-mapping", mapping_path])
+                self.assertEqual(r.returncode, 0, msg=r.stderr)
+                new_text = Path(md).read_text()
+                self.assertIn("![legacy](screenshots/legacy.png)", new_text)
+            finally:
+                if os.path.exists(mapping_path):
+                    os.unlink(mapping_path)
+        finally:
+            os.unlink(md)
+
+    def test_apply_mapping_mixed_string_and_dict_values(self):
+        """v0.3.0: real users will mix both formats. Both work in the
+        same mapping file."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write(textwrap.dedent("""\
+                # Manual
+                [SCREENSHOT: 01.png]
+                [SCREENSHOT: 02.png]
+            """))
+            md = f.name
+        try:
+            mapping_path = md + ".mapping.json"
+            try:
+                Path(mapping_path).write_text(json.dumps({
+                    "01": "screenshots/01.png",                       # string form
+                    "02": {"path": "screenshots/02.png",
+                           "alt": "详情页（弹窗打开后）"},             # dict form
+                }))
+                r = run(["record-manual", md, "--apply-mapping", mapping_path])
+                self.assertEqual(r.returncode, 0, msg=r.stderr)
+                new_text = Path(md).read_text()
+                self.assertIn("![01](screenshots/01.png)", new_text)
+                self.assertIn("![详情页（弹窗打开后）](screenshots/02.png)", new_text)
+            finally:
+                if os.path.exists(mapping_path):
+                    os.unlink(mapping_path)
+        finally:
+            os.unlink(md)
+
+    def test_apply_mapping_invalid_value_shape_reported_in_missing(self):
+        """v0.3.0: a mapping value that's neither a string nor a
+        valid dict (missing 'path' key) is reported in the missing
+        list with a clear reason, NOT silently dropped."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write("# Manual\n[SCREENSHOT: 01.png]\n")
+            md = f.name
+        try:
+            mapping_path = md + ".mapping.json"
+            try:
+                Path(mapping_path).write_text(json.dumps({
+                    "01": ["not", "a", "string"],   # invalid shape: list
+                }))
+                r = run(["record-manual", md, "--apply-mapping", mapping_path])
+                self.assertEqual(r.returncode, 0, msg=r.stderr)
+                # The bad entry appears in missing with a reason
+                self.assertIn("placeholders still missing: 1", r.stdout)
+                self.assertIn("invalid mapping value", r.stdout)
+                # The placeholder is NOT replaced
+                new_text = Path(md).read_text()
+                self.assertIn("[SCREENSHOT: 01.png]", new_text)
+            finally:
+                if os.path.exists(mapping_path):
+                    os.unlink(mapping_path)
+        finally:
+            os.unlink(md)
+
 
 if __name__ == "__main__":
     unittest.main()

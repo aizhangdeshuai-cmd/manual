@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.3.0 (2026-06-12)
+
+### Mapping `alt` field — human-readable alt text for screen readers
+
+v0.2.x mapping values were always bare strings, and the alt text inside
+`![...](path)` defaulted to the mapping key — so a placeholder named
+`01-list` produced `![01-list](screenshots/01-list.png)`. Screen readers
+read out the kebab-case identifier, which is terrible for accessibility.
+
+v0.3.0 accepts a dict form with explicit alt text:
+
+```json
+{
+  "01-list": {
+    "path": "screenshots/01-list.png",
+    "alt": "任务列表页（带分页器和搜索框）"
+  }
+}
+```
+
+The alt is what appears inside `![...](path)`. **Backward compat**:
+bare string values are still accepted and alt falls back to the key, so
+existing v0.2.x mapping files need no migration. String and dict values
+can be mixed in the same mapping file.
+
+Invalid mapping values (neither string nor a dict with `path`) are now
+reported in the missing list with a clear `invalid mapping value`
+reason, instead of silently producing `![key](None)`.
+
+### Why this is a separate minor version (0.2.4 → 0.3.0, not 0.2.5)
+
+The change to `apply_recording_mapping`'s input schema (accepts both
+string and dict values) is observable to anyone who calls the helper
+programmatically. Per SemVer this is a backward-compatible feature
+addition, hence 0.3.0.
+
 ## 0.2.4 (2026-06-12)
 
 ### Architectural refactor — agent-mediated vision, zero LLM deps

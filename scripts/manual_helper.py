@@ -1204,6 +1204,21 @@ def _step_template_lines(placeholders: list[dict]) -> list[dict]:
     return out
 
 
+def _normalize_mapping_value(v) -> tuple[str, str | None]:
+    """v0.3.0 (mapping alt field): mapping values can be either a
+    bare string (the path; alt defaults to the key) or a dict
+    `{path, alt}` for explicit alt text. Returns (path, alt_or_None).
+    Raises ValueError on anything else."""
+    if isinstance(v, str):
+        return v, None
+    if isinstance(v, dict) and "path" in v:
+        return v["path"], v.get("alt")
+    raise ValueError(
+        f"invalid mapping value: {v!r} — must be a string path "
+        f"or a dict with 'path' (and optional 'alt')"
+    )
+
+
 def apply_recording_mapping(text: str, mapping: dict) -> tuple[str, dict, list, int]:
     """Replace placeholders in text with real asset paths from mapping.
 
@@ -1256,7 +1271,21 @@ def apply_recording_mapping(text: str, mapping: dict) -> tuple[str, dict, list, 
     reemplazado = {}
     missing = []
     replaced_instances = 0
-    for key, real_path in mapping.items():
+    for key, raw_value in mapping.items():
+        # v0.3.0: value can be a string path or a {path, alt} dict
+        try:
+            real_path, alt_override = _normalize_mapping_value(raw_value)
+        except ValueError as e:
+            # Surface the bad entry as a missing row so the user sees
+            # all mapping problems in one pass instead of one-at-a-time
+            missing.append({
+                "name": key,
+                "kind": "mapping_value",
+                "status": "no_mapping",
+                "reason": str(e),
+            })
+            continue
+        alt_text = alt_override if alt_override is not None else key
         if key.startswith("ai-annotated-"):
             name = key[len("ai-annotated-"):]
             pattern = re.compile(rf"\[AI\s+ANNOTATE\s*:\s*{re.escape(name)}(?:\.[A-Za-z0-9]+)?\]")
@@ -1266,7 +1295,10 @@ def apply_recording_mapping(text: str, mapping: dict) -> tuple[str, dict, list, 
                 rf"\[(?P<kind>SCREENSHOT|VIDEO)(?:\s+NEEDED)?\s*:\s*{re.escape(name)}(?:\.[A-Za-z0-9]+)?\]"
             )
         if pattern.search(text):
-            new_text, n = pattern.subn(f"![{key}]({real_path})", text)  # count=0: replace all
+            # v0.3.0: alt text now uses the explicit `alt` field if
+            # provided, else falls back to the mapping key (preserves
+            # v0.2.x behavior so existing mappings don't need migration).
+            new_text, n = pattern.subn(f"![{alt_text}]({real_path})", text)  # count=0: replace all
             text = new_text
             reemplazado[key] = real_path
             replaced_instances += n

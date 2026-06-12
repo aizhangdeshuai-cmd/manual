@@ -740,6 +740,29 @@ The script's output JSON includes `pending_ai_annotations: [...]` with the reque
    ```
    And run `record-manual --apply-mapping` to wire it in.
 
+### v0.3.0: mapping values can be `{path, alt}` for human-readable alt text
+
+v0.2.x mapping values were always bare strings, and the alt text inside `![...](path)` defaulted to the mapping key (e.g. `![01-list](screenshots/01-list.png)`). That's machine-readable but **terrible for screen readers** — they read out "zero-one-dash-list" instead of a description.
+
+v0.3.0 accepts a dict form for explicit alt text:
+
+```json
+{
+  "01-list": {
+    "path": "screenshots/01-list.png",
+    "alt": "任务列表页（带分页器和搜索框）"
+  },
+  "ai-annotated-01-list": {
+    "path": "screenshots/01-list.ai-annotated.png",
+    "alt": "任务列表页（带 AI 红框标注「新增」按钮）"
+  }
+}
+```
+
+**Backward compat**: bare string values are still accepted. The alt falls back to the key. Existing v0.2.x mapping files need no migration.
+
+You can mix string and dict values in the same mapping file.
+
 ### Why this is better than the old (v0.2.0) approach
 
 | | v0.2.0 (old) | v0.2.4 (new) |
