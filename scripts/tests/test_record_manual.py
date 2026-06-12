@@ -162,6 +162,78 @@ class RecordManualTests(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    # === v0.2.4: AI ANNOTATE placeholder support ===
+
+    def test_scan_recognizes_ai_annotate_placeholder(self):
+        """v0.2.4: [AI ANNOTATE: <name>] is a first-class placeholder kind
+        (agent-mediated vision annotation, see SKILL.md §15)."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write(textwrap.dedent("""\
+                # Manual
+                [SCREENSHOT: 01-list.png]
+                [AI ANNOTATE: 01-list]
+            """))
+            path = f.name
+        try:
+            r = run(["record-manual", path])
+            self.assertEqual(r.returncode, 0, msg=r.stderr)
+            self.assertIn("RECORDING_NEEDED", r.stdout)
+            self.assertIn("screenshots: 1", r.stdout)
+            # The AI ANNOTATE marker should NOT inflate the screenshot count
+            # (it produces a different output, see SKILL.md §15)
+            self.assertIn("ai_annotates: 1", r.stdout)
+        finally:
+            os.unlink(path)
+
+    def test_generate_template_includes_ai_annotate_step(self):
+        """v0.2.4: build_recorder_template emits an ai_annotate step for each
+        [AI ANNOTATE: <name>] marker."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write("[SCREENSHOT: 01-list.png]\n[AI ANNOTATE: 01-list]\n")
+            md = f.name
+        try:
+            template_path = md + ".template.json"
+            try:
+                run(["record-manual", md, "--generate-template", template_path])
+                data = json.loads(Path(template_path).read_text())
+                actions = [s.get("action") for s in data["steps"]]
+                self.assertIn("screenshot", actions)
+                self.assertIn("ai_annotate", actions)
+                # The ai_annotate step should reference the screenshot name
+                ai_step = next(s for s in data["steps"] if s.get("action") == "ai_annotate")
+                self.assertEqual(ai_step["screenshot"], "01-list")
+                self.assertIn("prompt", ai_step)
+            finally:
+                if os.path.exists(template_path):
+                    os.unlink(template_path)
+        finally:
+            os.unlink(md)
+
+    def test_apply_mapping_replaces_ai_annotate_placeholder(self):
+        """v0.2.4: --apply-mapping substitutes [AI ANNOTATE: x] placeholders
+        with the .ai-annotated.png path produced by apply-ai-responses."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write("# Manual\n[SCREENSHOT: 01-list.png]\n[AI ANNOTATE: 01-list]\n")
+            md = f.name
+        try:
+            mapping_path = md + ".mapping.json"
+            try:
+                Path(mapping_path).write_text(json.dumps({
+                    "01-list": "screenshots/01-list.png",
+                    "AI ANNOTATE: 01-list".replace("AI ANNOTATE: ", "ai-annotated-"): "screenshots/01-list.ai-annotated.png",
+                }))
+                r = run(["record-manual", md, "--apply-mapping", mapping_path])
+                self.assertEqual(r.returncode, 0, msg=r.stderr)
+                self.assertIn("replaced: 2 placeholders", r.stdout)
+                new_text = Path(md).read_text()
+                self.assertIn("![01-list](screenshots/01-list.png)", new_text)
+                self.assertIn("![ai-annotated-01-list](screenshots/01-list.ai-annotated.png)", new_text)
+            finally:
+                if os.path.exists(mapping_path):
+                    os.unlink(mapping_path)
+        finally:
+            os.unlink(md)
+
 
 if __name__ == "__main__":
     unittest.main()

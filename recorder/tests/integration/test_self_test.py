@@ -256,3 +256,33 @@ def test_self_test_install_log_has_no_anthropic():
         "anthropic still in INSTALL_LOG — but it's no longer a recorder dep. "
         "The user might try to uninstall a non-existent package."
     )
+
+
+def test_self_test_no_anthropic_import_reachable():
+    """v0.2.4 audit tightening: lock the contract that no recorder_plugin
+    module can reach the anthropic SDK. This catches lazy-import leaks
+    (e.g. someone adding `import anthropic` inside a function) that
+    `grep` would miss but `sys.modules` catches."""
+    import sys
+    # Clear any preloaded anthropic
+    sys.modules.pop("anthropic", None)
+    # Import every public module in recorder_plugin
+    from recorder_plugin import core, state, retry, wait, annotate, login, video, mask, script, cli, vision
+    # None of these should pull in anthropic as a side effect
+    assert "anthropic" not in sys.modules, (
+        f"anthropic was imported as a side effect: {sorted(m for m in sys.modules if 'anthrop' in m.lower())}"
+    )
+
+
+def test_self_test_pyproject_version_matches():
+    """v0.2.4 audit: pyproject.toml version must match VERSION and __version__."""
+    import tomllib
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    version_file = Path(__file__).resolve().parents[2] / "VERSION"
+    with open(pyproject, "rb") as f:
+        py_ver = tomllib.load(f)["project"]["version"]
+    file_ver = version_file.read_text().strip()
+    from recorder_plugin import __version__ as runtime_ver
+    assert py_ver == file_ver == runtime_ver, (
+        f"version drift: pyproject={py_ver!r}, VERSION={file_ver!r}, runtime={runtime_ver!r}"
+    )

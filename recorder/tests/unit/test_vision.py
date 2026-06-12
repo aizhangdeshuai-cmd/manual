@@ -200,3 +200,128 @@ def test_apply_response_with_invalid_json_response(tmp_path):
     result = apply_response(req, response_path, tmp_path)
     assert result["status"] == "skipped"
     assert "invalid" in result["reason"]
+
+
+# ---------- v0.2.4 audit: 境界 (boundary) tests ----------
+
+def test_parse_response_boxes_silently_skips_non_list_boxes(tmp_path):
+    """v0.2.4 audit: schema mismatch — boxes is not a list — must NOT silently
+    succeed. parse_response_boxes returns [] for non-list, so the result is
+    'no boxes, passthrough' (test_verify_silent_skip below). Documenting
+    the current graceful-degrade behavior; a future stricter mode would
+    raise instead of returning []."""
+    response = {"step_name": "demo", "boxes": "not a list"}
+    boxes = parse_response_boxes(response)
+    assert boxes == []  # current behavior: silent skip
+
+def test_apply_response_with_non_list_boxes_passthrough(tmp_path):
+    """End-to-end: agent wrote boxes as wrong type (string not list).
+    Recorder must apply_response successfully (as a passthrough) so the
+    agent loop doesn't get stuck. The annotation count is 0, but the
+    status is 'applied' (no error) — passthrough to a copy of the source."""
+    img = tmp_path / "demo.png"
+    Image.new("RGB", (100, 100), "white").save(img)
+    req = write_request(tmp_path, "demo", img, "x")
+    response_path = response_path_for(req)
+    response_path.write_text(json.dumps({
+        "step_name": "demo",
+        "boxes": "wrong type",  # agent schema error
+    }))
+    result = apply_response(req, response_path, tmp_path)
+    assert result["status"] == "applied"
+    assert result["annotations_count"] == 0
+    # Passthrough copy must be byte-identical to source
+    annotated = Path(result["annotated_path"])
+    assert annotated.exists()
+    assert img.read_bytes() == annotated.read_bytes()
+
+
+def test_apply_responses_handles_multiple_requests_in_dir(tmp_path):
+    """v0.2.4 audit: multi-request — when output_dir has many pending requests,
+    apply-ai-responses processes them all. Already-applied ones have their
+    request files deleted (so re-runs are no-ops)."""
+    from recorder_plugin.vision import list_pending
+    img = tmp_path / "shared.png"
+    Image.new("RGB", (200, 200), "white").save(img)
+    names = ["a", "b", "c"]
+    for n in names:
+        # Each request references the same source image (simplest case)
+        req = write_request(tmp_path, n, img, f"find {n}")
+        # Each gets its own response with one box
+        resp = response_path_for(req)
+        resp.write_text(json.dumps({
+            "step_name": n,
+            "boxes": [{"label": n, "x": 10, "y": 10, "w": 50, "h": 30}],
+        }))
+    # Confirm all 3 are pending
+    pending = list_pending(tmp_path)
+    assert len(pending) == 3
+    # Apply each
+    from recorder_plugin.vision import apply_response
+    for req in pending:
+        r = apply_response(req, response_path_for(req), tmp_path)
+        assert r["status"] == "applied"
+    # All request files should be removed
+    assert list_pending(tmp_path) == []
+    # All 3 annotated PNGs should exist
+    for n in names:
+        assert (tmp_path / f"{n}.ai-annotated.png").exists()
+
+
+def test_stale_request_is_listed_for_agent_to_clean_up(tmp_path):
+    """v0.2.4 audit: stale request — agent never wrote a response.
+    apply-ai-responses must return status='skipped' so the agent loop
+    knows to debug. Request file is preserved (so the agent can retry by
+    writing the response)."""
+    img = tmp_path / "demo.png"
+    Image.new("RGB", (100, 100), "white").save(img)
+    req = write_request(tmp_path, "demo", img, "x")
+    response_path = response_path_for(req)
+    # No response written
+    result = apply_response(req, response_path, tmp_path)
+    assert result["status"] == "skipped"
+    assert "response missing" in result["reason"]
+    # Request file preserved for retry
+    assert req.exists()
+    # list_pending still finds it
+    from recorder_plugin.vision import list_pending
+    assert req in list_pending(tmp_path)
+
+
+def test_cli_apply_ai_responses_exits_1_when_any_skipped(tmp_path):
+    """v0.2.4 audit: apply-ai-responses must exit 1 if any request was skipped.
+    Old bug: all([]) == True in Python, so all-skipped → exit 0 (silent fail).
+    """
+    import subprocess
+    import sys
+    cli = Path(__file__).resolve().parents[2] / "recorder_plugin" / "cli.py"
+    # Create one stale request (no response)
+    img = tmp_path / "demo.png"
+    Image.new("RGB", (100, 100), "white").save(img)
+    write_request(tmp_path, "demo", img, "x")
+    r = subprocess.run(
+        [sys.executable, "-m", "recorder_plugin.cli", "apply-ai-responses", str(tmp_path)],
+        capture_output=True, text=True, cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    assert r.returncode == 1, f"expected exit 1 for skipped request, got {r.returncode}\nstdout: {r.stdout}\nstderr: {r.stderr}"
+    # Output must list the skipped request
+    assert "skipped" in r.stdout
+
+
+def test_cli_apply_ai_responses_exits_0_when_all_applied(tmp_path):
+    """v0.2.4 audit: happy path — all applied → exit 0."""
+    import subprocess
+    import sys
+    cli = Path(__file__).resolve().parents[2] / "recorder_plugin" / "cli.py"
+    img = tmp_path / "demo.png"
+    Image.new("RGB", (100, 100), "white").save(img)
+    req = write_request(tmp_path, "demo", img, "x")
+    response_path_for(req).write_text(json.dumps({
+        "step_name": "demo",
+        "boxes": [{"label": "x", "x": 10, "y": 10, "w": 50, "h": 30}],
+    }))
+    r = subprocess.run(
+        [sys.executable, "-m", "recorder_plugin.cli", "apply-ai-responses", str(tmp_path)],
+        capture_output=True, text=True, cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    assert r.returncode == 0, f"expected exit 0, got {r.returncode}\nstderr: {r.stderr}"

@@ -987,10 +987,11 @@ def cmd_record_manual(args):
     # Default: report
     if not placeholders:
         print(f"NO_RECORDING_NEEDED: {manual_path}")
-        print(f"  scanned: 1 file, 0 [SCREENSHOT:], 0 [VIDEO:] placeholders")
+        print(f"  scanned: 1 file, 0 [SCREENSHOT:], 0 [VIDEO:], 0 [AI ANNOTATE:] placeholders")
         return 0
     screens = [p for p in placeholders if p["kind"] == "screenshot"]
     videos = [p for p in placeholders if p["kind"] == "video"]
+    ai_anns = [p for p in placeholders if p["kind"] == "ai_annotate"]
     print(f"RECORDING_NEEDED: {manual_path}")
     print(f"  screenshots: {len(screens)}")
     for p in screens:
@@ -998,11 +999,17 @@ def cmd_record_manual(args):
     print(f"  videos: {len(videos)}")
     for p in videos:
         print(f"    [VIDEO: {p['name']}.mp4]")
+    if ai_anns:
+        print(f"  ai_annotates: {len(ai_anns)}  (v0.2.4: agent-mediated, see SKILL.md §15)")
+        for p in ai_anns:
+            print(f"    [AI ANNOTATE: {p['name']}]")
     print()
     print("Next step (LLM agent): see SKILL.md §14 — recording phase.")
     print("  1. Ask the user for: target URL, login credentials, mode (record/screenshot-only/skip).")
     print("  2. If record/screenshot-only: invoke the recorder opt-in plugin.")
     print(f"  3. After recorder produces assets: `record-manual {manual_path} --apply-mapping <json>`")
+    if ai_anns:
+        print("     (also: handle pending_ai_annotations via §15)")
 
     # --generate-template: also emit a recorder script template
     if gen_template is not None:
@@ -1014,20 +1021,30 @@ def cmd_record_manual(args):
     return 0
 
 
-# Placeholder syntax: [SCREENSHOT: <name>.png] / [VIDEO: <name>.mp4] / [SCREENSHOT NEEDED] / [VIDEO NEEDED]
+# Placeholder syntax:
+#   [SCREENSHOT: <name>.png]    [SCREENSHOT NEEDED: <name>.png]
+#   [VIDEO: <name>.mp4]         [VIDEO NEEDED: <name>.mp4]
+#   [AI ANNOTATE: <name>]        v0.2.4: agent-mediated vision annotation
+# All three kinds live in the same scan + apply-mapping pipeline.
 _PLACEHOLDER_RE = re.compile(
-    r"\[(?P<kind>SCREENSHOT|VIDEO)(?:\s+NEEDED)?\s*:\s*(?P<name>[A-Za-z0-9_\-]+)(?:\.\w+)?\]"
+    r"\[(?P<kind>SCREENSHOT|VIDEO|AI\s+ANNOTATE)(?:\s+NEEDED)?\s*:\s*(?P<name>[A-Za-z0-9_\-]+)(?:\.\w+)?\]"
 )
 
 
 def scan_recording_placeholders(text: str) -> list[dict]:
-    """Find all [SCREENSHOT: x.png] and [VIDEO: x.mp4] placeholders in text.
+    """Find all recording placeholders in text.
 
     v0.2.3: placeholders inside fenced code blocks (```...```) are
     ignored — those are documentation examples showing the syntax,
     not real recording targets.
 
-    Returns list of {"kind": "screenshot"|"video", "name": str, "line": int, "raw": str}.
+    v0.2.4: also recognizes `[AI ANNOTATE: <name>]` markers. These are
+    deferred to §15 of SKILL.md — the recorder writes a request file,
+    the agent fulfills it via its own LLM, recorder applies Pillow
+    annotation on re-run of `apply-ai-responses`.
+
+    Returns list of {"kind": "screenshot"|"video"|"ai_annotate", "name": str,
+                    "line": int, "raw": str}.
     """
     out = []
     in_code = False
@@ -1038,7 +1055,13 @@ def scan_recording_placeholders(text: str) -> list[dict]:
         if in_code:
             continue
         for m in _PLACEHOLDER_RE.finditer(line):
-            kind = "video" if m.group("kind") == "VIDEO" else "screenshot"
+            kind_raw = m.group("kind").replace(" ", "").lower()  # "AIANNOTATE" → "aiannotate"
+            if kind_raw == "aiannotate":
+                kind = "ai_annotate"
+            elif kind_raw == "video":
+                kind = "video"
+            else:
+                kind = "screenshot"
             out.append({"kind": kind, "name": m.group("name"), "line": i, "raw": m.group(0)})
     return out
 
@@ -1053,6 +1076,9 @@ def build_recorder_template(manual_name: str, placeholders: list[dict]) -> dict:
 
     Screenshots from the manual become explicit "screenshot" steps. Videos
     become "video_start" / "video_stop" pairs surrounding the relevant steps.
+    AI ANNOTATE markers become "ai_annotate" steps — the recorder will
+    write a request file and yield; the agent fulfills via its own LLM
+    (see recorder §15 / SKILL.md §15).
     """
     return {
         "_doc": (
@@ -1082,6 +1108,8 @@ def _step_template_lines(placeholders: list[dict]) -> list[dict]:
 
     Each screenshot → one `screenshot` step. Each video → a video_start /
     / video_stop pair surrounding the closest preceding screenshot.
+    Each AI ANNOTATE → one `ai_annotate` step (with a `screenshot` field
+    pointing at the source PNG; agent fulfills via its own LLM in §15).
     """
     out = []
     last_video_started = False
@@ -1101,6 +1129,12 @@ def _step_template_lines(placeholders: list[dict]) -> list[dict]:
                 # Multiple videos in a row: stop the previous before starting the next
                 out.append({"action": "video_stop", "name": f"<TODO: previous-video>"})
                 out.append({"action": "video_start", "name": p["name"]})
+        elif p["kind"] == "ai_annotate":
+            out.append({
+                "action": "ai_annotate",
+                "screenshot": p["name"],
+                "prompt": "<TODO: what UI element to find>",
+            })
     if last_video_started:
         out.append({"action": "video_stop", "name": "<TODO: last-video>"})
     return out
@@ -1109,29 +1143,42 @@ def _step_template_lines(placeholders: list[dict]) -> list[dict]:
 def apply_recording_mapping(text: str, mapping: dict) -> tuple[str, dict, list]:
     """Replace placeholders in text with real asset paths from mapping.
 
-    Returns (new_text, replaced, missing).
-      - replaced: {placeholder_name: real_path} for the ones that were replaced
-      - missing: list of placeholder names whose names didn't appear in mapping
+    Recognizes all 3 placeholder kinds (SCREENSHOT, VIDEO, AI ANNOTATE).
+
+    v0.2.4 naming convention for the mapping keys:
+      - Plain name (e.g. "01-list") -> replaces [SCREENSHOT: 01-list.*]
+        and [VIDEO: 01-list.*] placeholders. Value is the raw .png / .mp4 path.
+      - Prefixed name (e.g. "ai-annotated-01-list") -> replaces only
+        [AI ANNOTATE: 01-list] placeholders. Value is the *.ai-annotated.png
+        path produced by `apply-ai-responses`.
+
+    This separation lets the agent provide different paths for the raw
+    screenshot vs. the AI-annotated version. Documented in SKILL.md Sec 15.
     """
-    replaced = {}
+    reemplazado = {}
     missing = []
-    # Build a per-name regex: matches [SCREENSHOT: <name>.*] and [VIDEO: <name>.*]
-    for name, real_path in mapping.items():
-        pattern = re.compile(
-            rf"\[(?P<kind>SCREENSHOT|VIDEO)(?:\s+NEEDED)?\s*:\s*{re.escape(name)}(?:\.\w+)?\]"
-        )
+    for key, real_path in mapping.items():
+        if key.startswith("ai-annotated-"):
+            name = key[len("ai-annotated-"):]
+            pattern = re.compile(rf"\[AI\s+ANNOTATE\s*:\s*{re.escape(name)}(?:\.\w+)?\]")
+        else:
+            name = key
+            pattern = re.compile(
+                rf"\[(?P<kind>SCREENSHOT|VIDEO)(?:\s+NEEDED)?\s*:\s*{re.escape(name)}(?:\.\w+)?\]"
+            )
         if pattern.search(text):
-            new_text, n = pattern.subn(f"![{name}]({real_path})", text, count=1)
+            new_text, n = pattern.subn(f"![{key}]({real_path})", text, count=1)
             text = new_text
-            replaced[name] = real_path
-    # Now find which placeholder names in the remaining text have no mapping entry
+            reemplazado[key] = real_path
     remaining = scan_recording_placeholders(text)
     for p in remaining:
-        if p["name"] not in mapping:
-            missing.append(p["name"])
-    return text, replaced, missing
-
-
+        if p["kind"] == "ai_annotate":
+            if p["name"] not in mapping and f"ai-annotated-{p[chr(34)+chr(110)+chr(97)+chr(109)+chr(101)+chr(34)]}" not in mapping:
+                missing.append(p["name"])
+        else:
+            if p["name"] not in mapping:
+                missing.append(p["name"])
+    return text, reemplazado, missing
 def main(argv: list[str]) -> int:
     if len(argv) < 2 or argv[1] in ("--help", "-h", "help"):
         print(__doc__)

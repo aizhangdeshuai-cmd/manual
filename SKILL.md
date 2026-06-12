@@ -627,7 +627,8 @@ The LLM agent must ask the user **once** which mode to use, with a default of "r
 ```
 1. LLM agent runs:
    python3 -m manual_helper record-manual <path-to-manual.md>
-   # → prints: "RECORDING_NEEDED: N screenshots, M videos"
+   # → prints: "RECORDING_NEEDED: N screenshots, M videos" (and any
+   #   [AI ANNOTATE: x] markers, see §15)
 
 2. (Optional) LLM agent asks user for URL + creds, then runs:
    python3 -m manual_helper record-manual <path> --generate-template <out.json>
@@ -638,16 +639,35 @@ The LLM agent must ask the user **once** which mode to use, with a default of "r
    this step fails. The user must `pip install -e recorder/[test]` per
    recorder/INSTALL.md and re-run.
 
-4. After recording finishes, the recorder produced real .png / .mp4 files.
-   The LLM agent produces a mapping JSON:
+   ⚠️  v0.2.4: after `python3 -m recorder_plugin.cli run <script>`,
+   the output JSON's `pending_ai_annotations` field may list vision
+   requests. **Do not skip this.** The agent MUST handle it BEFORE
+   --apply-mapping. See §15 for the full flow.
+
+4. (v0.2.4 only — agent-mediated AI annotation, see §15):
+   for each entry in pending_ai_annotations:
+     a. read <output_dir>/.ai_annotation_request_<name>.json
+     b. use the agent's OWN multimodal LLM to read the image
+     c. write <output_dir>/.ai_annotation_response_<name>.json with
+        {"step_name": "<name>", "boxes": [{"label": "...", "x": 0, "y": 0,
+                                            "w": 100, "h": 50}, ...]}
+        (coords normalized to 0-1000 — see §15 for details)
+     d. run: python3 -m recorder_plugin.cli apply-ai-responses <output-dir>
+     e. exit code: 0 = all applied, 1 = some skipped (the agent must debug)
+
+5. After recording (and AI annotation, if any) finishes, the recorder
+   produced real .png / .mp4 files. The LLM agent produces a mapping JSON:
    {
      "01-list": "docs/user-manual/screenshots/sys/01-list.png",
-     "demo-flow": "docs/user-manual/screenshots/sys/demo-flow.mp4"
+     "demo-flow": "docs/user-manual/screenshots/sys/demo-flow.mp4",
+     "ai-annotated-01-list": "docs/user-manual/screenshots/sys/01-list.ai-annotated.png"
    }
+   (the `ai-annotated-*` keys are only present if §15 was used)
 
-5. LLM agent runs:
+6. LLM agent runs:
    python3 -m manual_helper record-manual <path> --apply-mapping <mapping.json>
-   # → replaces [SCREENSHOT: x] / [VIDEO: x] placeholders with ![x](path) markdown
+   # → replaces [SCREENSHOT: x] / [VIDEO: x] / [AI ANNOTATE: x] placeholders
+   #   with ![x](path) markdown
    # → prints "replaced: N placeholders, placeholders still missing: M"
    # → if M > 0, the agent must decide: re-run recorder for missing, or
    #   accept the gap (call them out in the manual's "Open Questions" section)
@@ -657,9 +677,87 @@ The LLM agent must ask the user **once** which mode to use, with a default of "r
 
 | Subcommand | Purpose |
 |---|---|
-| `record-manual <manual.md>` | Scan and report placeholders. Exits 0 always; never modifies the manual. |
+| `record-manual <manual.md>` | Scan and report placeholders (`[SCREENSHOT:]`, `[VIDEO:]`, `[AI ANNOTATE:]`). Exits 0 always; never modifies the manual. |
 | `record-manual <manual.md> --generate-template <out.json>` | Same, plus emit a recorder script template the LLM agent fills in. |
-| `record-manual <manual.md> --apply-mapping <mapping.json>` | Replace placeholders with real paths from the mapping. Writes the manual back. |
+| `record-manual <manual.md> --apply-mapping <mapping.json>` | Replace placeholders with real paths from the mapping. Writes the manual back. Recognizes all 3 placeholder kinds. |
+
+## 15. AI 标注阶段 (v0.2.4 — agent-mediated, provider-agnostic)
+
+This section covers AI vision annotation. **v0.2.4 changed the architecture**: the recorder NO LONGER calls any LLM directly. Vision is fulfilled by the agent loop using whatever model the harness has access to. This means:
+
+- **No `ANTHROPIC_API_KEY` env var** — recorder is provider-agnostic
+- **No `anthropic` pip dep** — recorder's only deps are `playwright`, `Pillow`, `mcp`
+- **Works in Claude Code, Codex, Cursor, Ollama** — whatever the agent's model is
+
+### How it appears in the manual
+
+The LLM agent writing the manual can include a special placeholder marker:
+
+```markdown
+![alt text](screenshots/01-list.png)
+[AI ANNOTATE: 01-list]
+```
+
+The `[AI ANNOTATE: 01-list]` marker tells the agent: "after recording, run vision annotation on `01-list.png`". It is **optional** — the LLM only emits it when it makes sense (e.g. "auto-find the primary button" rather than "I've already hand-selected the button at coords X,Y").
+
+### How it works at runtime
+
+The recorder's `ai_annotate` step (v0.2.4) **does not** call any LLM. It writes a request file:
+
+```
+<output_dir>/.ai_annotation_request_<name>.json
+{
+  "step_name": "01-list",
+  "image_path": "<output_dir>/01-list.png",
+  "prompt": "Find the primary action button",
+  "coord_base": 1000,
+  "prompt_hint": "Return a JSON object {step_name, boxes: [{label, x, y, w, h}, ...]}. Coords normalized to 1000×1000 (the recorder will denormalize).",
+  "schema_version": 1
+}
+```
+
+The script's output JSON includes `pending_ai_annotations: [...]` with the request paths. The agent loop sees these and, for each one:
+
+1. **Read the request file** (image path, prompt, schema)
+2. **Read the image** (e.g. via the agent's `read_image` tool or equivalent)
+3. **Call the agent's own multimodal LLM** with the image + prompt
+4. **Write the response file** at `.ai_annotation_response_<name>.json`:
+   ```json
+   {
+     "step_name": "01-list",
+     "boxes": [
+       {"label": "primary-btn", "x": 50, "y": 100, "w": 200, "h": 40}
+     ]
+   }
+   ```
+   (Coordinates normalized to 0-1000. The recorder will denormalize to actual pixel dimensions.)
+5. **Run** `python3 -m recorder_plugin.cli apply-ai-responses <output-dir>`
+   - This applies Pillow annotations, writes `<name>.ai-annotated.png`
+   - Exits 0 if all applied, **1 if any skipped** (so the agent notices failures — was: 0 due to `all([]) == True` Python gotcha)
+6. **Update the apply-mapping JSON** to include the annotated path:
+   ```json
+   {"ai-annotated-01-list": "screenshots/01-list.ai-annotated.png"}
+   ```
+   And run `record-manual --apply-mapping` to wire it in.
+
+### Why this is better than the old (v0.2.0) approach
+
+| | v0.2.0 (old) | v0.2.4 (new) |
+|---|---|---|
+| API calls | recorder calls Anthropic SDK | agent calls its own model |
+| Provider lock-in | Claude only | Whatever the harness provides |
+| Double-billing | Yes (agent loop + recorder) | No (single LLM call, by the agent) |
+| Setup | `ANTHROPIC_API_KEY` env var | None |
+| pip deps | `anthropic` | (gone) |
+| Harness compat | Claude Code only | Claude Code / Codex / Cursor / Ollama |
+
+### Reference
+
+- `recorder/recorder_plugin/vision.py` — request/response protocol implementation (no LLM calls)
+- `recorder/recorder_plugin/cli.py` — `apply-ai-responses` subcommand
+- `recorder/SKILL.md` — recorder-side §"ai_annotate" / "Prerequisites" / "MCP tools"
+- `recorder/tests/unit/test_vision.py` — 19 tests of the protocol, no SDK mocking
+- `recorder/tests/integration/test_self_test.py` — end-to-end self-test (write request → fake-agent response → apply)
 
 ### What this section explicitly does NOT do
 

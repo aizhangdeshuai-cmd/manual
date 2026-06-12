@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.2.4 (2026-06-12)
+
+### Architectural refactor — agent-mediated vision, zero LLM deps
+
+The recorder no longer calls any LLM API directly. AI vision annotation
+is fulfilled by the agent loop using whatever model the harness provides
+(Claude in Claude Code, GPT-4o in Codex, Llama-3.2-vision in Ollama,
+etc.). Zero provider lock-in, zero double-billing.
+
+v0.2.0 introduced `ai_annotate` as a direct Anthropic API call. v0.2.4
+replaces that with a **request/response protocol**: recorder writes a
+request file, yields, the agent fulfills the response file using its own
+multimodal model, recorder applies Pillow annotation. The recorder is
+now a deterministic data plane with zero LLM knowledge.
+
+**Removed**:
+- `recorder_plugin/vision.py`: all `anthropic` SDK calls. Replaced with
+  a request/response protocol (`write_request`, `list_pending`,
+  `response_path_for`, `read_response`, `parse_response_boxes`,
+  `denormalize_boxes`, `apply_response`).
+- `anthropic>=0.40` from `recorder/pyproject.toml`.
+- `anthropic` row from `docs/INSTALL_LOG.md`.
+- The `ANTHROPIC_API_KEY` env var requirement.
+- `pyproject.toml` bumped 0.1.0 → 0.2.4 (was: silently out of sync
+  with the on-disk VERSION and `__version__`).
+
+**New CLI subcommand**:
+- `apply-ai-responses <output-dir>` — reads pending
+  `_ai_annotation_response_*.json` files written by the agent, applies
+  Pillow annotations, deletes the matching request files. Exits 1 if
+  any requests are skipped (so the agent notices failures; was: 0 due
+  to the `all([]) == True` Python gotcha).
+
+**New script output field**:
+- `pending_ai_annotations: [{step_name, request_file, image_path,
+  prompt}, ...]` — surface of in-flight vision requests so the agent
+  loop can pick them up.
+
+**New tests** (`tests/unit/test_vision.py`):
+- 19 tests covering the request/response protocol. No Anthropic mocking.
+- Full end-to-end: write_request → fake-agent response → apply_response
+  → verified annotated PNG + request file cleanup.
+- Audit round: 3 boundary tests (multi-request, stale request,
+  schema mismatch where `boxes` is not a list).
+
+**Total recorder deps**: `playwright`, `Pillow`, `mcp` (3 packages,
+down from 4). Stdlib only otherwise.
+
+Test count: 80 → 88 (v0.2.2: +2 video regression; v0.2.4: +19 vision
+protocol; -13 from removing old SDK-mock vision tests that no longer
+apply).
+
 ## 0.2.1 (2026-06-12)
 
 Bug-fix release from external-agent test feedback.

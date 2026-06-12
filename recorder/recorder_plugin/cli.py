@@ -47,10 +47,16 @@ def main(argv: list[str]) -> int:
             resp = response_path_for(req)
             r = apply_response(req, resp, out_dir)
             results.append(r)
-        print(json.dumps({"applied": [r for r in results if r["status"] == "applied"],
-                         "skipped": [r for r in results if r["status"] == "skipped"]},
+        applied = [r for r in results if r["status"] == "applied"]
+        skipped = [r for r in results if r["status"] == "skipped"]
+        print(json.dumps({"applied": applied, "skipped": skipped},
                         indent=2, default=str))
-        return 0 if all(r["status"] == "applied" for r in results) else 1
+        # v0.2.4 audit fix: any-skipped → exit 1 so the agent notices failures.
+        # all([]) is True in Python, so we have to handle the "all skipped" case
+        # explicitly — otherwise the agent would think everything succeeded.
+        if skipped:
+            return 1
+        return 0
     print(f"unknown subcommand: {argv[1]}", file=sys.stderr)
     _usage()
     return 2
