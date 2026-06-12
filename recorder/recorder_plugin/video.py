@@ -39,10 +39,17 @@ def validate_slice(path: Path) -> bool:
         return False
 
 
-def slice_video(src: Path, out_dir: Path, slice_seconds: int = 10) -> list[Path]:
-    """Slice a video into fixed-duration chunks. Returns list of slice paths."""
+def slice_video(src: Path, out_dir: Path, slice_seconds: int = 10, output_stem: str | None = None) -> list[Path]:
+    """Slice a video into fixed-duration chunks. Returns list of slice paths.
+
+    v0.2.1: `output_stem` controls the slice filename prefix. Default is
+    `src.stem` (the input file's name, e.g. a Playwright random UUID). Pass
+    an explicit stem (e.g. the step name) to get predictable, dryrun-aligned
+    filenames like `create-flow.0000.webm`.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
-    pattern = out_dir / f"{src.stem}.%04d.webm"
+    stem = output_stem or src.stem
+    pattern = out_dir / f"{stem}.%04d.webm"
     subprocess.run([
         "ffmpeg", "-y", "-i", str(src),
         "-c", "copy",
@@ -51,7 +58,7 @@ def slice_video(src: Path, out_dir: Path, slice_seconds: int = 10) -> list[Path]
         "-reset_timestamps", "1",
         str(pattern),
     ], check=True, capture_output=True)
-    return sorted(out_dir.glob(f"{src.stem}.*.webm"))
+    return sorted(out_dir.glob(f"{stem}.*.webm"))
 
 
 def concat_slices_to_mp4(

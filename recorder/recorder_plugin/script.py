@@ -132,51 +132,85 @@ async def _handle_ai_annotate(
 
 
 async def _handle_video_start(rec: Recorder, step: dict, name_to_path: dict) -> None:
-    # v1: recording is started by Recorder() with record_video_dir. We just remember the name.
+    # v0.2.1: remember the current page so _handle_video_stop can close it
+    # to flush Playwright's webm to rec_dir.
     name = _to_kebab(step["name"])
-    name_to_path[f"_video_{name}"] = {"started_at": time.monotonic()}
+    name_to_path[f"_video_{name}"] = {
+        "started_at": time.monotonic(),
+        "recording_page": rec.page,
+    }
 
 
 async def _handle_video_stop(
     rec: Recorder, step: dict, name_to_path: dict, output_dir: Path
 ) -> AssetRef:
-    """v1.1: slice the recorded webm, concat into one MP4, return reference.
+    """v0.2.1: slice the recorded webm, concat into one MP4, return reference.
 
-    The MP4 is the new canonical asset; individual slices are still kept for reference.
+    v0.2.1 timing fix: Playwright writes the webm to rec_dir only when the
+    *page* is closed. So we close the page that was active during recording,
+    which flushes the webm, then process it. We then open a fresh page for
+    any subsequent steps in the script.
     """
-    from recorder_plugin.video import concat_slices_to_mp4, validate_slice, get_video_info
+    from recorder_plugin.video import (
+        concat_slices_to_mp4, validate_slice, get_video_info,
+    )
+    from recorder_plugin.video import slice_video as slice_v
     name = _to_kebab(step["name"])
     rec_dir = rec.record_video_dir
     if not rec_dir:
         return AssetRef(path=output_dir / f"{name}.mp4", kind="video_slice", size_bytes=0)
+
+    # Flush the webm: close the page that was active during recording.
+    name_key = f"_video_{name}"
+    session = name_to_path.get(name_key, {})
+    recording_page = session.get("recording_page") if isinstance(session, dict) else None
+    if recording_page is not None and not recording_page.is_closed():
+        try:
+            await recording_page.close()
+        except Exception:
+            pass
+
     webms = sorted(rec_dir.glob("*.webm"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not webms:
         return AssetRef(path=output_dir / f"{name}.mp4", kind="video_slice", size_bytes=0)
     src = webms[0]
     target_dir = output_dir / name
     target_dir.mkdir(parents=True, exist_ok=True)
-    slices = slice_video(src, target_dir, slice_seconds=10)
+    # v0.2.1: use step name as the slice stem, not the random webm UUID
+    slices = slice_v(src, target_dir, slice_seconds=10, output_stem=name)
     if not slices:
         return AssetRef(path=src, kind="video_slice", size_bytes=src.stat().st_size)
     if not validate_slice(slices[0]):
         return AssetRef(path=slices[0], kind="video_slice", size_bytes=slices[0].stat().st_size)
-    # v1.1: concat all valid slices into one MP4
     valid_slices = [s for s in slices if validate_slice(s)]
     if valid_slices:
         mp4_path = target_dir / f"{name}.mp4"
         try:
             concat_slices_to_mp4(valid_slices, mp4_path, audio=False)
-            return AssetRef(
+            asset = AssetRef(
                 path=mp4_path, kind="video_slice",
                 size_bytes=mp4_path.stat().st_size, slice_index=0,
                 extra={"duration_s": get_video_info(mp4_path)["duration_s"]},
             )
         except Exception:
-            pass  # fall through to first slice
-    return AssetRef(
-        path=slices[0], kind="video_slice",
-        size_bytes=slices[0].stat().st_size, slice_index=0,
-    )
+            asset = AssetRef(
+                path=slices[0], kind="video_slice",
+                size_bytes=slices[0].stat().st_size, slice_index=0,
+            )
+    else:
+        asset = AssetRef(
+            path=slices[0], kind="video_slice",
+            size_bytes=slices[0].stat().st_size, slice_index=0,
+        )
+
+    # Open a fresh page on the same context for any subsequent steps.
+    try:
+        new_page = await rec.context.new_page()
+        rec._page = new_page
+    except Exception:
+        pass
+
+    return asset
 
 
 async def run_script(script_path: Path) -> dict:

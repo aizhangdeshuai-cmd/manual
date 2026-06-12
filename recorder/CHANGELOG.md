@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.2.1 (2026-06-12)
+
+Bug-fix release from external-agent test feedback.
+
+### Fixed
+
+- **video_stop was completely broken** (v0.1.0 → v0.2.0). The recorded webm
+  lives in `rec_dir` only when the *page* is closed. The script runner's
+  `async with Recorder` kept the context (and page) open until the entire
+  script ended, so `_handle_video_stop` at step N found zero webm files and
+  returned a 0-byte placeholder. Symptom: `videos[0].size_bytes == 0` and
+  no MP4 on disk, even though `_video_buffer/page@<uuid>.webm` was recorded.
+  Fix: `_handle_video_start` remembers the recording page; `_handle_video_stop`
+  closes it to flush the webm, processes the video, then opens a fresh page
+  for any subsequent steps in the script.
+- **Slice filenames used Playwright's random UUID instead of the step name**.
+  `video.py:slice_video` now takes an `output_stem` parameter; the script
+  runner passes the kebab-cased step name, so slices are named
+  `<step-name>.NNNN.webm` (matching the dryrun convention) instead of
+  `<random-uuid>.NNNN.webm`.
+
+### Added
+
+- **SKILL.md — Prerequisites table** with min versions, how to verify, and
+  install commands. Was previously missing; agents had to guess what to
+  install.
+- **SKILL.md — `wait_for` strategy reference table** (selector / text /
+  networkidle / timeout) with args and behavior. Plus a note that
+  `custom_js` is intentionally rejected for security.
+- **2 new integration tests** (`tests/integration/test_video.py`):
+  - `test_video_stop_flushes_webm_by_closing_page` — regression for the
+    page-close timing fix
+  - `test_video_stop_naming_no_random_uuid` — regression for the slice
+    naming fix
+
+Test count: 80 (was 78 in v0.2.0; +2 new tests).
+
 ## 0.2.0 (2026-06-11)
 
 v1.1 release. Adds three v1-deferred features from spec §13:
