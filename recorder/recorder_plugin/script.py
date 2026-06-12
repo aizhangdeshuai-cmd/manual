@@ -106,28 +106,41 @@ async def _handle_login(rec: Recorder, step: dict, env: dict) -> bool:
 
 
 async def _handle_ai_annotate(
-    step: dict, output_dir: Path
+    step: dict, output_dir: Path, pending_annotations: list
 ) -> AssetRef | None:
-    """v1.1: take a fresh screenshot, send to Claude vision, apply annotations.
+    """v0.2.4: agent-mediated vision annotation (no LLM calls in recorder).
 
-    The step may EITHER:
-    - Reference an existing screenshot by name: {"action": "ai_annotate", "screenshot": "01-list", "prompt": "..."}
-    - Take a fresh screenshot first: {"action": "ai_annotate", "name": "01-list", "prompt": "...", "fresh": true}
+    v0.2.4 protocol: recorder writes a request file and yields control.
+    The agent loop reads the request, calls its OWN multimodal LLM
+    (Claude in Claude Code, GPT-4o in Codex, etc.), writes a response
+    file, then re-invokes recorder's `apply-ai-responses` subcommand.
 
-    Returns the annotated AssetRef, or None if the source screenshot doesn't exist.
+    The `pending_annotations` list is appended to so the script output
+    can surface pending requests to the agent.
+
+    Returns the source image (a passthrough) AssetRef. The actual
+    annotated PNG is produced later by `apply-ai-responses`.
     """
-    from recorder_plugin.vision import ai_annotate_and_save
+    from recorder_plugin.vision import write_request
     prompt = step.get("prompt") or step.get("description") or "Find notable UI elements"
     name = _to_kebab(step.get("screenshot") or step.get("name") or "ai-annotated")
     src = output_dir / f"{name}.png"
     if not src.exists():
         return None
-    dst = output_dir / f"{name}.ai-annotated.png"
-    annotations = ai_annotate_and_save(src, prompt, dst)
+    # Emit the request file. Recorder does NOT call any LLM.
+    req_path = write_request(output_dir, name, src, prompt)
+    pending_annotations.append({
+        "step_name": name,
+        "request_file": str(req_path),
+        "image_path": str(src),
+        "prompt": prompt,
+    })
+    # Return a passthrough AssetRef pointing at the source image.
+    # The annotated file will be produced by apply-ai-responses.
     return AssetRef(
-        path=dst, kind="screenshot", size_bytes=dst.stat().st_size,
-        annotated=True,
-        caption_hint=f"AI-annotated ({len(annotations)} boxes): {prompt[:30]}",
+        path=src, kind="screenshot", size_bytes=src.stat().st_size,
+        annotated=False,
+        caption_hint=f"AI-annotation pending (request emitted): {prompt[:30]}",
     )
 
 
@@ -240,6 +253,7 @@ async def run_script(script_path: Path) -> dict:
 
     name_to_path: dict[str, Any] = {}
 
+    pending_annotations: list[dict] = []
     async with Recorder(
         viewport=viewport, headless=True,
         output_dir=output_dir, record_video_dir=rec_dir,
@@ -313,7 +327,7 @@ async def run_script(script_path: Path) -> dict:
                     videos.append(asset_dict)
                     state.set_video_session(name, asset.path, validated=True)
                 elif action == "ai_annotate":
-                    asset = await _handle_ai_annotate(step, output_dir)
+                    asset = await _handle_ai_annotate(step, output_dir, pending_annotations)
                     if asset is None:
                         errors.append({
                             "step": i, "action": "ai_annotate",
@@ -342,4 +356,5 @@ async def run_script(script_path: Path) -> dict:
         "warnings": warnings,
         "errors": errors,
         "upload_hints": upload_hints,
+        "pending_ai_annotations": pending_annotations,  # v0.2.4
     }

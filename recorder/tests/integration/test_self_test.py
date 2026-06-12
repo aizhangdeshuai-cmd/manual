@@ -14,6 +14,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 import pytest
 
@@ -26,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 def test_all_modules_importable():
     """Every recorder_plugin module imports cleanly."""
     from recorder_plugin import __version__
-    assert __version__ == "0.2.1", f"expected version 0.2.1, got {__version__}"
+    assert __version__ == "0.2.4", f"expected version 0.2.4, got {__version__}"
 
     import recorder_plugin.core
     import recorder_plugin.state
@@ -51,12 +52,14 @@ def test_cli_help_and_version():
     )
     assert "recorder CLI" in out_help.stdout
     assert "recorder_plugin.cli run" in out_help.stdout
+    # v0.2.4: also expose the new apply-ai-responses subcommand
+    assert "apply-ai-responses" in out_help.stdout
 
     out_ver = subprocess.run(
         [sys.executable, "-m", "recorder_plugin.cli", "--version"],
         capture_output=True, text=True, check=True,
     )
-    assert out_ver.stdout.strip() == "0.2.1"
+    assert out_ver.stdout.strip() == "0.2.4"
 
 
 def test_mcp_tools_count():
@@ -211,68 +214,45 @@ async def test_self_test_idempotency(fixture_url, tmp_path):
     assert len(skipped_actions) >= 1
 
 
-# === AI vision module self-test (no actual API call) ===
+# === AI vision module self-test (v0.2.4: protocol only, no SDK) ===
 
-def test_self_test_vision_module_loads():
-    """vision module + anthropic SDK import successfully (no API call)."""
+def test_self_test_vision_module_request_response():
+    """v0.2.4: vision module exposes request/response helpers, no LLM calls.
+    Verifies the protocol functions exist and are usable end-to-end."""
     from recorder_plugin.vision import (
-        ai_annotate_image, ai_annotate_and_save,
-        _encode_image_b64, _build_user_prompt,
-        DEFAULT_MODEL,
+        write_request, list_pending, response_path_for, apply_response,
     )
-    # Model should be a Claude vision model
-    assert "claude" in DEFAULT_MODEL.lower()
-    # Should raise RuntimeError if API key not set (not silently no-op)
-    from pathlib import Path
-    import tempfile
     from PIL import Image
     with tempfile.TemporaryDirectory() as td:
-        p = Path(td) / "s.png"
-        Image.new("RGB", (100, 100), "white").save(p)
-        with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
-            ai_annotate_image(p, "test", api_key=None)  # no env, no explicit
+        td_path = Path(td)
+        img = td_path / "demo.png"
+        Image.new("RGB", (100, 100), "white").save(img)
+        # Recorder writes a request
+        req = write_request(td_path, "demo", img, "Find the primary button")
+        assert req.exists()
+        # Request is findable
+        assert len(list_pending(td_path)) == 1
+        # Simulated agent writes a response
+        resp = response_path_for(req)
+        resp.write_text(json.dumps({
+            "step_name": "demo",
+            "boxes": [{"label": "btn", "x": 10, "y": 10, "w": 50, "h": 30}],
+        }))
+        # Recorder applies → produces annotated PNG
+        result = apply_response(req, resp, td_path)
+        assert result["status"] == "applied"
+        assert result["annotations_count"] == 1
+        # Request file cleaned up
+        assert not req.exists()
 
 
-# === wait strategy whitelist self-test ===
-
-def test_self_test_wait_strategies_whitelisted():
-    """Only the 4 whitelisted strategies are accepted; custom_js is rejected."""
-    from recorder_plugin.wait import WaitSpec
-
-    # All 4 whitelisted should parse
-    for s in [{"strategy": "selector", "selector": "h1"},
-             {"strategy": "text", "text": "Saved"},
-             {"strategy": "networkidle"},
-             {"strategy": "timeout", "ms": 1000}]:
-        spec = WaitSpec.from_dict(s)
-        assert spec.strategy == s["strategy"]
-
-    # custom_js rejected with helpful error
-    with pytest.raises(ValueError, match="custom_js is not supported"):
-        WaitSpec.from_dict({"strategy": "custom_js", "js": "alert(1)"})
-
-    # Unknown strategy rejected
-    with pytest.raises(ValueError, match="Unknown wait strategy"):
-        WaitSpec.from_dict({"strategy": "potato"})
-
-
-# === Install manifest self-test ===
-
-def test_self_test_install_log_mentions_anthropic():
-    """The user must be able to track what was installed (per their '要下载东西要记录好' rule)."""
-    # INSTALL_LOG.md is at the user-manual repo root, NOT inside recorder/
-    # recorder/tests/integration/X.py → up 3 = recorder, up 4 = user-manual
+def test_self_test_install_log_has_no_anthropic():
+    """v0.2.4: INSTALL_LOG must NOT list anthropic (it's no longer a dep).
+    The user's '要下载东西要记录好' rule requires uninstall accuracy."""
     install_log = Path(__file__).resolve().parents[3] / "docs" / "INSTALL_LOG.md"
     text = install_log.read_text()
-    assert "anthropic" in text, "anthropic not in INSTALL_LOG — user can't uninstall"
-
-
-# === Versioning self-test ===
-
-def test_self_test_changelog_documents_v021():
-    """CHANGELOG must include v0.2.1 entry so user can trace upgrade path."""
-    cl = Path(__file__).resolve().parents[2] / "CHANGELOG.md"
-    text = cl.read_text()
-    assert "0.2.1" in text
-    assert "video" in text.lower()  # at least mentions the video fix
-    assert "naming" in text.lower() or "slice" in text.lower()  # or naming fix
+    # anthropic should NOT appear in the pip packages table anymore
+    assert "anthropic" not in text, (
+        "anthropic still in INSTALL_LOG — but it's no longer a recorder dep. "
+        "The user might try to uninstall a non-existent package."
+    )

@@ -21,7 +21,6 @@ Each entry: what, where, how installed, how to remove, date added.
 | `playwright` | `>=1.40,<2.0` | **1.60.0** | `recorder/recorder/core.py`, `video.py` | `pip install "playwright>=1.40,<2.0"` | `pip uninstall playwright` | ✅ already installed |
 | `Pillow` | `>=10.0` | **12.2.0** | `recorder/recorder/annotate.py`, `mask.py` | `pip install "Pillow>=10.0"` | `pip uninstall Pillow` | ✅ already installed |
 | `mcp` | `>=1.0` | **1.27.2** | `recorder/recorder_plugin/mcp_server.py` | `pip install "mcp>=1.0"` | `pip uninstall mcp` | ✅ installed this session |
-| `anthropic` | `>=0.40` | **0.109.1** | `recorder/recorder_plugin/vision.py` (v1.1) | `pip install "anthropic>=0.40"` | `pip uninstall anthropic` | ✅ installed this session (v1.1 AI vision) |
 | `pyee` | (transitive) | 13.0.1 | playwright dep | (auto) | (auto) | ✅ auto |
 | `greenlet` | (transitive) | 3.5.0 | playwright dep | (auto) | (auto) | ✅ auto |
 

@@ -19,12 +19,14 @@ Before running the recorder, the host environment must have:
 | `playwright` (pip) | 1.40 - 1.59 | `python3 -c "import playwright; print(playwright.__version__)"` | Provided by `pip install -e .` in `INSTALL.md` |
 | `Pillow` (pip) | 10.0+ | `python3 -c "import PIL; print(PIL.__version__)"` | Annotation rendering |
 | `mcp` (pip) | 1.0+ | `python3 -c "import mcp"` | Only needed for MCP server mode |
-| `anthropic` (pip) | 0.40+ | optional — only for `ai_annotate` step | Set `ANTHROPIC_API_KEY` env var |
 | `ffmpeg` (system) | 4.4+ | `ffmpeg -version` | Video slicing + concat |
 | Chromium (Playwright) | bundled | `python3 -m playwright install chromium` | First-time setup |
 | CJK fonts (Linux only) | noto-cjk | `fc-list :lang=zh` | macOS has system fonts |
 
-The `INSTALL.md` walks through installing all of the above.
+**v0.2.4 — no LLM deps.** The recorder no longer calls any LLM API. AI
+vision annotation is fulfilled by the agent loop using its own model
+(Claude in Claude Code, GPT-4o in Codex, Llama-3.2-vision in Ollama,
+etc.). Zero provider lock-in. See §14.
 
 ## When the parent user-manual skill uses it
 
@@ -45,24 +47,46 @@ When the user-manual skill's LLM agent encounters a `[SCREENSHOT NEEDED]` or `[V
 
 ```bash
 # Verify the recorder is installed
-python3 -m recorder_plugin.cli --version    # → 0.2.1
+python3 -m recorder_plugin.cli --version    # → 0.2.4
 ffmpeg -version | head -1                    # → ffmpeg 4.4+
 
-# Optional: for AI annotation, set the API key
-export ANTHROPIC_API_KEY=sk-ant-...           # needed only for `ai_annotate` steps
+# No API keys needed — vision is handled by your agent's own LLM
 
 # Run an existing script
 python3 -m recorder_plugin.cli run examples/sample_script.json
 
 # The output is JSON on stdout, with paths to all generated assets.
+# If the script had ai_annotate steps, look for "pending_ai_annotations"
+# in the output — the agent fulfills those via the request/response protocol.
 ```
 
 ## Script schema (declarative mode)
 
 See `examples/sample_script.json` for a complete example. The 12 step actions:
-`navigate`, `click`, `type`, `wait_for`, `screenshot`, `login`, `video_start`, `video_stop`, `set_viewport`, `ai_annotate` (v1.1, requires `ANTHROPIC_API_KEY`).
+`navigate`, `click`, `type`, `wait_for`, `screenshot`, `login`, `video_start`, `video_stop`, `set_viewport`, `ai_annotate` (v0.2.4: request/response — see §14 below).
 
 The `video_stop` step produces a single MP4 (concat of N 10s webm slices) via `video.concat_slices_to_mp4`. State-tracked across re-runs: a script with the same name will skip the video session if it was already validated.
+
+### `ai_annotate` step (v0.2.4 — agent-mediated, provider-agnostic)
+
+The `ai_annotate` step writes a request file and **does not** call any LLM. The recorder never depends on a specific vision provider.
+
+Protocol:
+
+1. **Recorders writes** `<output-dir>/.ai_annotation_request_<name>.json` containing `{image_path, prompt, step_name, coord_base: 1000, prompt_hint}`.
+2. **Script runner returns** the script output JSON with `pending_ai_annotations: [{step_name, request_file, image_path, prompt}, ...]`.
+3. **The LLM agent loop** sees `pending_ai_annotations`, reads the request files, uses its own multimodal model (Claude/GPT-4o/Llama/etc.) to identify UI elements, and writes:
+   ```
+   <output-dir>/.ai_annotation_response_<name>.json
+   ```
+   with `{step_name, boxes: [{label, x, y, w, h}, ...]}` (coords normalized to 0-1000).
+4. **Recorder applies** by re-running:
+   ```
+   python3 -m recorder_plugin.cli apply-ai-responses <output-dir>
+   ```
+   which reads each response, applies Pillow annotations, writes `<name>.ai-annotated.png`, and deletes the request file.
+
+**This means**: zero provider lock-in, zero double-billing. The recorder pays for nothing; vision is fulfilled by whichever model the user's harness already provides.
 
 ### `wait_for` strategies (v1 whitelist)
 

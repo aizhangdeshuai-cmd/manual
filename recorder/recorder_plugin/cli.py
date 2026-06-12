@@ -11,6 +11,7 @@ def _usage() -> None:
     print()
     print("Usage:")
     print("  python3 -m recorder_plugin.cli run <script.json>")
+    print("  python3 -m recorder_plugin.cli apply-ai-responses <output-dir>")
     print("  python3 -m recorder_plugin.cli --version")
     print("  python3 -m recorder_plugin.cli --help")
 
@@ -31,6 +32,25 @@ def main(argv: list[str]) -> int:
         result = asyncio.run(run_script(Path(argv[2])))
         print(json.dumps(result, indent=2))
         return 0 if result["status"] == "ok" else 1
+    if argv[1] == "apply-ai-responses":
+        if len(argv) != 3:
+            print("usage: python3 -m recorder_plugin.cli apply-ai-responses <output-dir>", file=sys.stderr)
+            return 2
+        from recorder_plugin.vision import list_pending, response_path_for, apply_response
+        out_dir = Path(argv[2])
+        pending = list_pending(out_dir)
+        if not pending:
+            print(f"NO_PENDING: {out_dir}")
+            return 0
+        results = []
+        for req in pending:
+            resp = response_path_for(req)
+            r = apply_response(req, resp, out_dir)
+            results.append(r)
+        print(json.dumps({"applied": [r for r in results if r["status"] == "applied"],
+                         "skipped": [r for r in results if r["status"] == "skipped"]},
+                        indent=2, default=str))
+        return 0 if all(r["status"] == "applied" for r in results) else 1
     print(f"unknown subcommand: {argv[1]}", file=sys.stderr)
     _usage()
     return 2
