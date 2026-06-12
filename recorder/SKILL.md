@@ -88,6 +88,8 @@ Protocol:
 
 **This means**: zero provider lock-in, zero double-billing. The recorder pays for nothing; vision is fulfilled by whichever model the user's harness already provides.
 
+**Prerequisite** (v0.2.4 audit round 3 follow-up): AI annotation requires the **harness's configured LLM to be vision-capable** — e.g. Claude Sonnet/Opus, GPT-4o, Gemini, Qwen-VL, LLaVA via Ollama. If the harness is configured with a **text-only** model (Qwen 2.5/3, DeepSeek V3/R1, MiniMax Text-01, etc.), the agent loop **cannot fulfill** `pending_ai_annotations` and `apply-ai-responses` will exit 1 with `skipped_missing_response` indefinitely. The recorder does NOT route around this — it's the user's choice of model. Workarounds: switch the harness to a vision-capable model, or manually annotate the screenshots outside the recorder, or omit `[AI ANNOTATE: x]` placeholders from the manual entirely.
+
 ### `apply-ai-responses` return contract (v0.2.4 audit round 3, H5)
 
 When the agent loop calls `python -m recorder_plugin.cli apply-ai-responses <output-dir>`, each request produces one of these statuses:

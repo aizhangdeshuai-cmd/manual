@@ -159,3 +159,30 @@ def test_to_kebab_emits_warning_on_normalization_collision():
         sys.stderr = old_stderr
     assert "01-list" in captured.getvalue()
     assert "01 List" in captured.getvalue()
+
+
+# === v0.2.4 audit round 3 follow-up: LLM-vision prerequisite doc ===
+
+def test_skill_md_documents_llm_vision_prerequisite():
+    """Lock the §15 prerequisite note that says AI annotation requires a
+    vision-capable LLM. The user explicitly asked for this so that
+    anyone hitting `skipped_missing_response` with a text-only model
+    (Qwen, DeepSeek, MiniMax, etc.) has a single place in the docs
+    to discover the cause and the workarounds."""
+    skill_md = (Path(__file__).resolve().parents[2] / "SKILL.md").read_text()
+    # The note must mention both the supported and unsupported model
+    # families so the user can match their harness to one or the other.
+    assert "vision-capable" in skill_md, (
+        "SKILL.md §15 must call out the vision-capable LLM prerequisite"
+    )
+    # Concrete examples of text-only models that the user raised
+    for name in ("Qwen 2.5/3", "DeepSeek V3/R1", "MiniMax"):
+        assert name in skill_md, (
+            f"SKILL.md §15 must list {name!r} as a text-only model "
+            f"that cannot fulfill ai_annotate requests"
+        )
+    # Workarounds must be mentioned
+    for workaround in ("switch the harness", "manually annotate", "omit"):
+        assert workaround in skill_md, (
+            f"SKILL.md §15 must mention the {workaround!r} workaround"
+        )
