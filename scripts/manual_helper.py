@@ -1133,7 +1133,7 @@ def _step_template_lines(placeholders: list[dict]) -> list[dict]:
             out.append({
                 "action": "ai_annotate",
                 "screenshot": p["name"],
-                "prompt": "<TODO: what UI element to find>",
+                "prompt": "",  # F3 fix: agent MUST fill in. Empty prompt -> script runner warns to stderr.
             })
     if last_video_started:
         out.append({"action": "video_stop", "name": "<TODO: last-video>"})
@@ -1154,6 +1154,13 @@ def apply_recording_mapping(text: str, mapping: dict) -> tuple[str, dict, list]:
 
     This separation lets the agent provide different paths for the raw
     screenshot vs. the AI-annotated version. Documented in SKILL.md Sec 15.
+
+    F1 fix: replace ALL occurrences of each placeholder name (not just
+    the first). Previous count=1 left 2nd+ same-name placeholders un-replaced.
+    F2 fix: AI ANNOTATE placeholders REQUIRE the `ai-annotated-` prefix
+    mapping. If only a plain-name mapping exists for the same name, that's
+    a config error and the AI ANNOTATE is reported in missing (with
+    explicit reason) instead of being silently dropped.
     """
     reemplazado = {}
     missing = []
@@ -1167,17 +1174,35 @@ def apply_recording_mapping(text: str, mapping: dict) -> tuple[str, dict, list]:
                 rf"\[(?P<kind>SCREENSHOT|VIDEO)(?:\s+NEEDED)?\s*:\s*{re.escape(name)}(?:\.\w+)?\]"
             )
         if pattern.search(text):
-            new_text, n = pattern.subn(f"![{key}]({real_path})", text, count=1)
+            new_text, n = pattern.subn(f"![{key}]({real_path})", text)  # count=0: replace all
             text = new_text
             reemplazado[key] = real_path
     remaining = scan_recording_placeholders(text)
     for p in remaining:
         if p["kind"] == "ai_annotate":
-            if p["name"] not in mapping and f"ai-annotated-{p[chr(34)+chr(110)+chr(97)+chr(109)+chr(101)+chr(34)]}" not in mapping:
-                missing.append(p["name"])
+            prefixed_key = f"ai-annotated-{p['name']}"
+            # F2 fix: explicit missing detection for AI ANNOTATE
+            if prefixed_key in mapping:
+                continue
+            if p["name"] in mapping:
+                missing.append({
+                    "name": p["name"],
+                    "kind": "ai_annotate",
+                    "reason": f"AI ANNOTATE requires mapping key 'ai-annotated-{p['name']}', not plain '{p['name']}'. Plain key replaces [SCREENSHOT:] only.",
+                })
+            else:
+                missing.append({
+                    "name": p["name"],
+                    "kind": "ai_annotate",
+                    "reason": f"No mapping entry for this AI ANNOTATE. Add 'ai-annotated-{p['name']}' to mapping.",
+                })
         else:
             if p["name"] not in mapping:
-                missing.append(p["name"])
+                missing.append({
+                    "name": p["name"],
+                    "kind": p["kind"],
+                    "reason": f"No mapping entry for this {p['kind']} placeholder.",
+                })
     return text, reemplazado, missing
 def main(argv: list[str]) -> int:
     if len(argv) < 2 or argv[1] in ("--help", "-h", "help"):

@@ -97,7 +97,7 @@ class RecordManualTests(unittest.TestCase):
                 }))
                 r = run(["record-manual", md, "--apply-mapping", mapping_path])
                 self.assertEqual(r.returncode, 0, msg=r.stderr)
-                self.assertIn("replaced: 2 placeholders", r.stdout)
+                self.assertIn("replaced: 2 placeholders", r.stdout)  # 2 unique mapping keys
                 self.assertIn("placeholders still missing: 1", r.stdout)
                 # Read the updated manual
                 new_text = Path(md).read_text()
@@ -220,14 +220,127 @@ class RecordManualTests(unittest.TestCase):
             try:
                 Path(mapping_path).write_text(json.dumps({
                     "01-list": "screenshots/01-list.png",
-                    "AI ANNOTATE: 01-list".replace("AI ANNOTATE: ", "ai-annotated-"): "screenshots/01-list.ai-annotated.png",
+                    "ai-annotated-01-list": "screenshots/01-list.ai-annotated.png",
                 }))
                 r = run(["record-manual", md, "--apply-mapping", mapping_path])
                 self.assertEqual(r.returncode, 0, msg=r.stderr)
-                self.assertIn("replaced: 2 placeholders", r.stdout)
+                self.assertIn("replaced: 2 placeholders", r.stdout)  # 2 unique mapping keys
                 new_text = Path(md).read_text()
                 self.assertIn("![01-list](screenshots/01-list.png)", new_text)
                 self.assertIn("![ai-annotated-01-list](screenshots/01-list.ai-annotated.png)", new_text)
+            finally:
+                if os.path.exists(mapping_path):
+                    os.unlink(mapping_path)
+        finally:
+            os.unlink(md)
+
+    # === v0.2.4 audit re-review: F1/F2/F3 regression tests ===
+
+    def test_apply_mapping_replaces_all_occurrences_of_same_placeholder(self):
+        """F1 fix: 2+ same-name placeholders in the manual (e.g. same
+        screenshot referenced in 2 task cards) must ALL be replaced.
+        Previous count=1 only replaced the first occurrence."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write(textwrap.dedent("""\
+                # Manual
+                ## 任务卡 1
+                [SCREENSHOT: 01-list.png]
+                ## 任务卡 2
+                [SCREENSHOT: 01-list.png]
+            """))
+            md = f.name
+        try:
+            mapping_path = md + ".mapping.json"
+            try:
+                Path(mapping_path).write_text(json.dumps({
+                    "01-list": "screenshots/01-list.png",
+                }))
+                r = run(["record-manual", md, "--apply-mapping", mapping_path])
+                self.assertEqual(r.returncode, 0, msg=r.stderr)
+                self.assertIn("replaced: 1 placeholders", r.stdout)  # 1 unique mapping key
+                new_text = Path(md).read_text()
+                # Both occurrences must be replaced (not just the first)
+                self.assertNotIn("[SCREENSHOT: 01-list.png]", new_text)
+                self.assertEqual(new_text.count("![01-list](screenshots/01-list.png)"), 2,
+                                 f"expected 2 replacements, got {new_text.count('![01-list]')}")
+            finally:
+                if os.path.exists(mapping_path):
+                    os.unlink(mapping_path)
+        finally:
+            os.unlink(md)
+
+    def test_ai_annotate_missing_when_only_plain_mapping_exists(self):
+        """F2 fix: AI ANNOTATE placeholder requires the `ai-annotated-` prefix
+        mapping. If only a plain-name mapping exists for the same name,
+        that's a config error and the AI ANNOTATE is reported in missing
+        (with explicit reason) instead of being silently dropped."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write(textwrap.dedent("""\
+                # Manual
+                [SCREENSHOT: 01-list.png]
+                [AI ANNOTATE: 01-list]
+            """))
+            md = f.name
+        try:
+            mapping_path = md + ".mapping.json"
+            try:
+                # Only plain name, NO `ai-annotated-` prefix
+                Path(mapping_path).write_text(json.dumps({
+                    "01-list": "screenshots/01-list.png",
+                }))
+                r = run(["record-manual", md, "--apply-mapping", mapping_path])
+                self.assertEqual(r.returncode, 0, msg=r.stderr)
+                # The SCREENSHOT was replaced
+                self.assertIn("replaced: 1 placeholders", r.stdout)
+                # The AI ANNOTATE is in missing (not silently dropped)
+                self.assertIn("placeholders still missing: 1", r.stdout)
+                # Explicit reason: AI ANNOTATE requires ai-annotated- prefix
+                self.assertIn("ai-annotated-01-list", r.stdout)
+                # The AI ANNOTATE marker is still in the manual
+                new_text = Path(md).read_text()
+                self.assertIn("[AI ANNOTATE: 01-list]", new_text)
+            finally:
+                if os.path.exists(mapping_path):
+                    os.unlink(mapping_path)
+        finally:
+            os.unlink(md)
+
+    def test_ai_annotate_missing_when_no_mapping_at_all(self):
+        """F2 fix: AI ANNOTATE with no mapping entry at all → in missing with
+        a clear 'add ai-annotated-NAME' instruction."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write("[AI ANNOTATE: solo]\n")
+            md = f.name
+        try:
+            mapping_path = md + ".mapping.json"
+            try:
+                Path(mapping_path).write_text(json.dumps({}))
+                r = run(["record-manual", md, "--apply-mapping", mapping_path])
+                self.assertIn("placeholders still missing: 1", r.stdout)
+                self.assertIn("solo", r.stdout)
+            finally:
+                if os.path.exists(mapping_path):
+                    os.unlink(mapping_path)
+        finally:
+            os.unlink(md)
+
+    def test_ai_annotate_missing_with_prefix_is_satisfied(self):
+        """F2 fix: happy path — AI ANNOTATE + `ai-annotated-` prefix mapping
+        is correctly replaced and NOT in missing."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write("[AI ANNOTATE: happy]\n")
+            md = f.name
+        try:
+            mapping_path = md + ".mapping.json"
+            try:
+                Path(mapping_path).write_text(json.dumps({
+                    "ai-annotated-happy": "screenshots/happy.ai-annotated.png",
+                }))
+                r = run(["record-manual", md, "--apply-mapping", mapping_path])
+                self.assertIn("replaced: 1 placeholders", r.stdout)
+                self.assertNotIn("placeholders still missing", r.stdout)
+                new_text = Path(md).read_text()
+                self.assertIn("![ai-annotated-happy](screenshots/happy.ai-annotated.png)", new_text)
             finally:
                 if os.path.exists(mapping_path):
                     os.unlink(mapping_path)

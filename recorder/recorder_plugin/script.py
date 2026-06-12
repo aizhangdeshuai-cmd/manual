@@ -127,6 +127,17 @@ async def _handle_ai_annotate(
     src = output_dir / f"{name}.png"
     if not src.exists():
         return None
+    # F3 fix (v0.2.4 audit re-review): if the prompt is a literal TODO marker
+    # (e.g. from an unfilled build_recorder_template), warn loudly. The
+    # request file is still written so the agent can debug, but a stderr
+    # warning makes the unfilled state visible.
+    if "<TODO" in prompt or prompt.strip() == "":
+        print(
+            f"WARNING: ai_annotate step '{name}' has empty/TODO prompt. "
+            f"Agent must fill in step['prompt'] before the request goes to the LLM. "
+            f"Writing request with placeholder prompt anyway — agent should re-edit script.",
+            file=sys.stderr,
+        )
     # Emit the request file. Recorder does NOT call any LLM.
     req_path = write_request(output_dir, name, src, prompt)
     pending_annotations.append({
