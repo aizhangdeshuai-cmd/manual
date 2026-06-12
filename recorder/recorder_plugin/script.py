@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import shutil
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +51,15 @@ def _resolve_creds(d: dict, env: dict) -> dict:
 
 async def _handle_navigate(rec: Recorder, step: dict) -> None:
     await rec.navigate(step["url"])
+
+
+async def _handle_set_viewport(rec: Recorder, step: dict) -> None:
+    """v0.2.4 audit round 3 (C4): previously a no-op (dispatched through
+    ALLOWED_STEP_ACTIONS but no elif branch). Resize the Playwright
+    page so subsequent screenshots / clicks use the new viewport."""
+    width = int(step.get("width", 1280))
+    height = int(step.get("height", 800))
+    await rec.page.set_viewport_size({"width": width, "height": height})
 
 
 async def _handle_click(rec: Recorder, step: dict) -> tuple[bool, str, int]:
@@ -161,6 +171,12 @@ async def _handle_video_start(rec: Recorder, step: dict, name_to_path: dict) -> 
     name = _to_kebab(step["name"])
     name_to_path[f"_video_{name}"] = {
         "started_at": time.monotonic(),
+        # v0.2.4 audit round 3 (C3): also record wall-clock start time
+        # so _handle_video_stop can filter out webms from previous
+        # sessions (back-to-back video_start/video_stop in the same
+        # script). monotonic() is for duration math; we need wall time
+        # to compare against file mtimes.
+        "started_wall": time.time(),
         "recording_page": rec.page,
     }
 
@@ -188,13 +204,30 @@ async def _handle_video_stop(
     name_key = f"_video_{name}"
     session = name_to_path.get(name_key, {})
     recording_page = session.get("recording_page") if isinstance(session, dict) else None
+    # v0.2.4 audit round 3 (H2): wrap page close in wait_for so a hung
+    # Playwright teardown cannot block the whole script. TimeoutError
+    # is logged as a warning — the webm may still flush from the
+    # Playwright context teardown at session end.
     if recording_page is not None and not recording_page.is_closed():
         try:
-            await recording_page.close()
-        except Exception:
-            pass
+            await asyncio.wait_for(recording_page.close(), timeout=10)
+        except (asyncio.TimeoutError, Exception) as e:
+            print(
+                f"WARNING: recording_page.close() for video '{name}' "
+                f"timed out or failed ({type(e).__name__}: {e}); "
+                f"webm may flush late via context teardown.",
+                file=sys.stderr,
+            )
 
-    webms = sorted(rec_dir.glob("*.webm"), key=lambda p: p.stat().st_mtime, reverse=True)
+    # v0.2.4 audit round 3 (C3): filter webms by session wall-clock
+    # start time to avoid back-to-back session aliasing. Without
+    # this, the second video_stop in the same run picked the most
+    # recently MODIFIED webm — which could be the previous session's
+    # still-flushing file. 1.0s tolerance for clock jitter.
+    session_wall = session.get("started_wall", 0) if isinstance(session, dict) else 0
+    webms_all = rec_dir.glob("*.webm")
+    webms = [p for p in webms_all if p.stat().st_mtime >= session_wall - 1.0]
+    webms.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     if not webms:
         return AssetRef(path=output_dir / f"{name}.mp4", kind="video_slice", size_bytes=0)
     src = webms[0]
@@ -281,6 +314,8 @@ async def run_script(script_path: Path) -> dict:
             try:
                 if action == "navigate":
                     await _handle_navigate(rec, step)
+                elif action == "set_viewport":
+                    await _handle_set_viewport(rec, step)
                 elif action == "click":
                     ok, winning, attempts = await _handle_click(rec, step)
                     if not ok:

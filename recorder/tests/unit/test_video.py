@@ -1,4 +1,5 @@
 import subprocess
+import tempfile
 from pathlib import Path
 import pytest
 from recorder_plugin.video import (
@@ -109,3 +110,52 @@ def test_get_total_duration_sums_correctly(tmp_path):
         paths.append(p)
     total = get_total_duration(paths)
     assert 2.5 < total < 3.5
+
+
+# === v0.2.4 audit round 3: H1 (validate_slice logging) ===
+
+def test_validate_slice_logs_when_file_missing(caplog):
+    """H1: a missing file used to return False silently. Now logs a
+    warning naming the path so the operator can diagnose."""
+    import logging
+    from recorder_plugin.video import validate_slice
+    caplog.set_level(logging.WARNING, logger="recorder_plugin.video")
+    missing = Path("/tmp/this/does/not/exist/anywhere.webm")
+    assert validate_slice(missing) is False
+    assert any("does not exist" in r.message for r in caplog.records)
+
+
+def test_validate_slice_logs_when_file_truncated(caplog):
+    """H1: a < 100 byte file used to return False silently. Now logs
+    a warning with the actual size."""
+    import logging
+    from recorder_plugin.video import validate_slice
+    caplog.set_level(logging.WARNING, logger="recorder_plugin.video")
+    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as f:
+        f.write(b"x" * 50)  # < 100 bytes
+        tiny_path = Path(f.name)
+    try:
+        assert validate_slice(tiny_path) is False
+        assert any("truncated" in r.message for r in caplog.records)
+        assert any("50 bytes" in r.message for r in caplog.records)
+    finally:
+        tiny_path.unlink()
+
+
+def test_validate_slice_logs_when_ffprobe_fails(caplog):
+    """H1: a file that exists and is > 100 bytes but fails ffprobe
+    used to return False silently. Now logs the ffprobe error type."""
+    import logging
+    from recorder_plugin.video import validate_slice
+    caplog.set_level(logging.WARNING, logger="recorder_plugin.video")
+    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as f:
+        f.write(b"\x00" * 200)  # 200 bytes of zeros
+        bogus_path = Path(f.name)
+    try:
+        assert validate_slice(bogus_path) is False
+        assert len(caplog.records) >= 1, (
+            f"expected at least 1 warning, got 0; this is the H1 "
+            f"regression — validate_slice returned False silently again."
+        )
+    finally:
+        bogus_path.unlink()

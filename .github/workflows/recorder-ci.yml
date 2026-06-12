@@ -29,7 +29,12 @@ jobs:
           pip install -e ".[test]"
       - name: Install Playwright browsers
         working-directory: recorder
-        run: playwright install --with-deps chromium
+        # v0.2.4 audit round 3 (C6): INSTALL.md:33 explicitly warns that
+        # the npm-global `playwright` binary in $PATH silently no-ops on
+        # `install chromium` on macOS / some monorepos. The CI was doing
+        # exactly that. Always use `python -m` to invoke the pip-installed
+        # playwright, not whatever happens to be on PATH.
+        run: python -m playwright install --with-deps chromium
       - name: Hello-world Playwright launch
         working-directory: recorder
         run: |

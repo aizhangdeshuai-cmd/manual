@@ -40,9 +40,26 @@ Do not install Firefox or WebKit — recorder v1 is Chromium-only.
 ## Verify the install
 
 ```bash
-python3 -m recorder_plugin.cli --version       # → 0.1.0
+python3 -m recorder_plugin.cli --version       # → 0.2.4
 ffmpeg -version | head -1                       # → ffmpeg 4.4+
-python3 -c "from playwright.sync_api import sync_playwright; sync_playwright().__enter__()"  # no error
+# v0.2.4 audit round 3 (C5): the previous verify command called
+# sync_playwright().__enter__() but never invoked p.chromium.launch(),
+# so it passed silently on a machine where Chromium was never
+# downloaded. This actually launches headless Chromium, navigates to
+# about:blank, and closes — if this fails with "Executable doesn't
+# exist" you forgot step 3 above.
+python3 -c "
+import asyncio
+from playwright.async_api import async_playwright
+async def main():
+    async with async_playwright() as p:
+        b = await p.chromium.launch(headless=True)
+        page = await b.new_page()
+        await page.goto('about:blank')
+        await b.close()
+        print('chromium ok')
+asyncio.run(main())
+"
 ```
 
 ## Run the bundled fixture

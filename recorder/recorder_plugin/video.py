@@ -5,10 +5,13 @@ doc embed. Uses the ffmpeg concat demuxer (requires intermediate concat list fil
 """
 from __future__ import annotations
 import json
+import logging
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def get_video_info(path: Path) -> dict[str, Any]:
@@ -24,18 +27,35 @@ def get_video_info(path: Path) -> dict[str, Any]:
         "duration_s": float(fmt.get("duration", 0)),
         "width": int(video_stream.get("width", 0)),
         "height": int(video_stream.get("height", 0)),
-        "codec": video_stream.get("codec_name", ""),
+        "codec": str(video_stream.get("codec_name", "")),
     }
 
 
 def validate_slice(path: Path) -> bool:
-    """ffprobe-validate a slice. Returns True if parseable and duration > 0."""
-    if not path.exists() or path.stat().st_size < 100:
+    """ffprobe-validate a slice. Returns True if parseable and duration > 0.
+
+    v0.2.4 audit round 3 (H1): a corrupt / truncated slice used to return
+    False silently, and the caller (script._handle_video_stop) then
+    cached the bad slice as validated=True in state.set_video_session.
+    Now we log the reason on failure so the operator can see WHICH
+    slice failed ffprobe and WHY (size, ffprobe error, duration=0).
+    """
+    if not path.exists():
+        logger.warning("validate_slice: file does not exist: %s", path)
+        return False
+    if path.stat().st_size < 100:
+        logger.warning("validate_slice: %s is %d bytes (< 100, likely truncated)",
+                       path, path.stat().st_size)
         return False
     try:
         info = get_video_info(path)
-        return info["duration_s"] > 0
-    except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError):
+        if info["duration_s"] <= 0:
+            logger.warning("validate_slice: %s has zero duration (ffprobe ok)", path)
+            return False
+        return True
+    except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError) as e:
+        logger.warning("validate_slice: ffprobe failed for %s: %s: %s",
+                       path, type(e).__name__, e)
         return False
 
 

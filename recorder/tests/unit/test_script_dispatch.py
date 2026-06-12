@@ -1,0 +1,116 @@
+"""Contract tests for the script.py dispatch loop.
+
+v0.2.4 audit round 3: the dispatch loop in `script.py:run_script` is
+the single source of truth for which `action:` values are valid. A
+mismatch between `ALLOWED_STEP_ACTIONS` and the actual `elif` branches
+silently no-ops the step (C4 regression). These tests assert the two
+lists stay in sync.
+"""
+import ast
+from pathlib import Path
+import pytest
+
+
+SCRIPT_PY = Path(__file__).resolve().parents[2] / "recorder_plugin" / "script.py"
+
+
+def _parse_script() -> ast.Module:
+    return ast.parse(SCRIPT_PY.read_text())
+
+
+def test_allowed_step_actions_set():
+    """ALLOWED_STEP_ACTIONS must be a non-empty set of string literals."""
+    tree = _parse_script()
+    allowed = None
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "ALLOWED_STEP_ACTIONS"):
+            allowed = ast.literal_eval(node.value)
+    assert allowed is not None, "ALLOWED_STEP_ACTIONS not found"
+    assert isinstance(allowed, set)
+    assert all(isinstance(a, str) for a in allowed)
+    # Must be 10 (v0.2.4: set_viewport + ai_annotate are the 2 we
+    # explicitly added; SKILL.md step-actions table claims 10)
+    assert len(allowed) == 10, f"expected 10 step actions, got {len(allowed)}: {allowed}"
+
+
+def test_every_allowed_action_has_an_elif_branch():
+    """For every action in ALLOWED_STEP_ACTIONS there must be an
+    `elif action == "<name>":` branch in run_script's dispatch loop.
+    C4 regression: set_viewport was in the set but had no elif →
+    user-facing no-op."""
+    tree = _parse_script()
+    # Collect allowed action names
+    allowed = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "ALLOWED_STEP_ACTIONS"):
+            allowed = ast.literal_eval(node.value)
+            break
+    # Collect elif action == "<name>": branches
+    found_in_dispatch = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If):
+            for child in ast.walk(node):
+                if not isinstance(child, ast.Compare):
+                    continue
+                # Pattern: action == "X" (or "X" == action)
+                left, right = child.left, child.comparators[0]
+                if not (isinstance(left, ast.Name) and left.id == "action"):
+                    continue
+                if not isinstance(right, ast.Constant) or not isinstance(right.value, str):
+                    continue
+                found_in_dispatch.add(right.value)
+    missing = allowed - found_in_dispatch
+    assert not missing, (
+        f"ALLOWED_STEP_ACTIONS contains {missing} but the dispatch loop "
+        f"has no `elif action == ...` branch for them. These actions "
+        f"will silently no-op (C4 regression)."
+    )
+
+
+def test_dispatch_branches_only_match_allowed_actions():
+    """Reverse direction: every `elif action == "X"` branch should be
+    listed in ALLOWED_STEP_ACTIONS (no orphan / dead dispatch)."""
+    tree = _parse_script()
+    allowed = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "ALLOWED_STEP_ACTIONS"):
+            allowed = ast.literal_eval(node.value)
+            break
+    found_in_dispatch = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If):
+            for child in ast.walk(node):
+                if not isinstance(child, ast.Compare):
+                    continue
+                left, right = child.left, child.comparators[0]
+                if not (isinstance(left, ast.Name) and left.id == "action"):
+                    continue
+                if not isinstance(right, ast.Constant) or not isinstance(right.value, str):
+                    continue
+                found_in_dispatch.add(right.value)
+    orphan = found_in_dispatch - allowed
+    assert not orphan, (
+        f"dispatch loop has `elif action == {orphan}` branch but those "
+        f"actions are not in ALLOWED_STEP_ACTIONS. Either add to the "
+        f"whitelist (preferred) or remove the dead branch."
+    )
+
+
+def test_script_module_imports_sys():
+    """C1: script.py uses `print(..., file=sys.stderr)` at line ~139
+    for the ai_annotate TODO-prompt warning. A previous audit found
+    the module did NOT `import sys` — every TODO prompt raised
+    NameError, swallowed by the dispatch try/except. Lock the fix."""
+    import recorder_plugin.script as s
+    assert hasattr(s, "sys"), "recorder_plugin.script must have `sys` attribute"
+    import sys
+    assert s.sys is sys

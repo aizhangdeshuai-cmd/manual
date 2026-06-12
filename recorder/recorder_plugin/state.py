@@ -16,14 +16,37 @@ STATE_FILENAME = ".recorder_state.json"
 
 
 def atomic_write_json(path: Path, data: dict) -> None:
-    """Write JSON atomically: write to .tmp, then os.replace."""
+    """Write JSON atomically: write to .tmp, fsync, then os.replace, fsync the dir.
+
+    v0.2.4 audit round 3 (C2): added `os.fsync(fd)` before close and
+    `os.fsync(dir_fd)` on the parent directory after `os.replace`. A
+    power loss / SIGKILL between replace and the page-cache flush
+    used to leave a zero-byte or stale file; the on-load
+    JSONDecodeError branch then silently reset to empty, making
+    every subsequent run treat all steps as fresh (loss of
+    idempotency). With both fsyncs, the data is durable before
+    os.replace returns.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".tmp_state_", suffix=".json")
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(fd)
         os.replace(tmp_path, path)
+        # fsync the directory entry too (POSIX requires this for the
+        # rename to be durable). Best-effort: not all filesystems
+        # support dir fsync; ignore OSError.
+        try:
+            dir_fd = os.open(str(path.parent), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except (OSError, AttributeError):
+            pass
     except Exception:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
