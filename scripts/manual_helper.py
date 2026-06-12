@@ -55,6 +55,18 @@ few primitives that are easy to get wrong in prose:
                                       — upload an image/video to object store,
                                          register it under the manual, print
                                          the public URL + md-insert hint.
+  * `record-manual <manual.md> [--generate-template <out.json>] [--apply-mapping <mapping.json>]`
+                                      — v0.2.3 recording phase. Default: scan
+                                         the manual for [SCREENSHOT: x] and
+                                         [VIDEO: x] placeholders and report
+                                         what needs recording. --generate-template:
+                                         emit a recorder script template (the
+                                         LLM agent fills in selectors and runs
+                                         it via the recorder opt-in plugin).
+                                         --apply-mapping: read a {placeholder:
+                                         real_path} JSON and replace placeholders
+                                         in the manual with real asset paths.
+                                         See SKILL.md §14 for the full workflow.
 
 Pure stdlib. Python 3.9+ (zoneinfo).
 
@@ -907,6 +919,219 @@ def cmd_extract_openapi(args):
     return r.returncode
 
 
+def cmd_record_manual(args):
+    """v0.2.3: recording phase helper. See SKILL.md §14.
+
+    Usage:
+      record-manual <manual.md>                           # scan + report placeholders
+      record-manual <manual.md> --generate-template <out>  # emit recorder script template
+      record-manual <manual.md> --apply-mapping <json>     # replace placeholders with real paths
+
+    Placeholder syntax (v1 standard):
+      [SCREENSHOT: <name>.png]
+      [VIDEO: <name>.mp4]   (or [VIDEO NEEDED] / [SCREENSHOT NEEDED] for missing)
+
+    Mapping JSON (for --apply-mapping):
+      {
+        "01-list": "docs/user-manual/screenshots/sys/01-list.png",
+        "demo": "docs/user-manual/screenshots/sys/demo-flow/demo-flow.mp4"
+      }
+    Keys are the placeholder name (without extension or brackets).
+    """
+    if not args:
+        print("usage: record-manual <manual.md> [--generate-template <out>] [--apply-mapping <json>]",
+              file=sys.stderr)
+        return 2
+    manual_path = Path(args[0])
+    if not manual_path.exists():
+        print(f"error: {manual_path} not found", file=sys.stderr)
+        return 1
+
+    # Parse flags
+    gen_template = None
+    apply_mapping = None
+    i = 1
+    while i < len(args):
+        if args[i] == "--generate-template" and i + 1 < len(args):
+            gen_template = Path(args[i + 1])
+            i += 2
+        elif args[i] == "--apply-mapping" and i + 1 < len(args):
+            apply_mapping = Path(args[i + 1])
+            i += 2
+        else:
+            print(f"error: unknown arg {args[i]!r}", file=sys.stderr)
+            return 2
+
+    text = manual_path.read_text(encoding="utf-8", errors="replace")
+    placeholders = scan_recording_placeholders(text)
+
+    # --apply-mapping: replace and write back
+    if apply_mapping is not None:
+        if not apply_mapping.exists():
+            print(f"error: mapping file {apply_mapping} not found", file=sys.stderr)
+            return 1
+        mapping = json.loads(apply_mapping.read_text())
+        new_text, replaced, missing = apply_recording_mapping(text, mapping)
+        manual_path.write_text(new_text, encoding="utf-8")
+        print(f"updated: {manual_path}")
+        print(f"  replaced: {len(replaced)} placeholders")
+        if replaced:
+            for k, v in sorted(replaced.items()):
+                print(f"    [SCREENSHOT: {k}.*] / [VIDEO: {k}.*]  ->  {v}")
+        if missing:
+            print(f"  placeholders still missing: {len(missing)}")
+            for name in missing:
+                print(f"    [SCREENSHOT: {name}.*] / [VIDEO: {name}.*]  (no mapping)")
+        return 0
+
+    # Default: report
+    if not placeholders:
+        print(f"NO_RECORDING_NEEDED: {manual_path}")
+        print(f"  scanned: 1 file, 0 [SCREENSHOT:], 0 [VIDEO:] placeholders")
+        return 0
+    screens = [p for p in placeholders if p["kind"] == "screenshot"]
+    videos = [p for p in placeholders if p["kind"] == "video"]
+    print(f"RECORDING_NEEDED: {manual_path}")
+    print(f"  screenshots: {len(screens)}")
+    for p in screens:
+        print(f"    [SCREENSHOT: {p['name']}.png]")
+    print(f"  videos: {len(videos)}")
+    for p in videos:
+        print(f"    [VIDEO: {p['name']}.mp4]")
+    print()
+    print("Next step (LLM agent): see SKILL.md §14 — recording phase.")
+    print("  1. Ask the user for: target URL, login credentials, mode (record/screenshot-only/skip).")
+    print("  2. If record/screenshot-only: invoke the recorder opt-in plugin.")
+    print(f"  3. After recorder produces assets: `record-manual {manual_path} --apply-mapping <json>`")
+
+    # --generate-template: also emit a recorder script template
+    if gen_template is not None:
+        template = build_recorder_template(manual_path.stem, placeholders)
+        gen_template.parent.mkdir(parents=True, exist_ok=True)
+        gen_template.write_text(json.dumps(template, indent=2, ensure_ascii=False) + "\n",
+                               encoding="utf-8")
+        print(f"  template: {gen_template}")
+    return 0
+
+
+# Placeholder syntax: [SCREENSHOT: <name>.png] / [VIDEO: <name>.mp4] / [SCREENSHOT NEEDED] / [VIDEO NEEDED]
+_PLACEHOLDER_RE = re.compile(
+    r"\[(?P<kind>SCREENSHOT|VIDEO)(?:\s+NEEDED)?\s*:\s*(?P<name>[A-Za-z0-9_\-]+)(?:\.\w+)?\]"
+)
+
+
+def scan_recording_placeholders(text: str) -> list[dict]:
+    """Find all [SCREENSHOT: x.png] and [VIDEO: x.mp4] placeholders in text.
+
+    v0.2.3: placeholders inside fenced code blocks (```...```) are
+    ignored — those are documentation examples showing the syntax,
+    not real recording targets.
+
+    Returns list of {"kind": "screenshot"|"video", "name": str, "line": int, "raw": str}.
+    """
+    out = []
+    in_code = False
+    for i, line in enumerate(text.splitlines(), 1):
+        if line.strip().startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code:
+            continue
+        for m in _PLACEHOLDER_RE.finditer(line):
+            kind = "video" if m.group("kind") == "VIDEO" else "screenshot"
+            out.append({"kind": kind, "name": m.group("name"), "line": i, "raw": m.group(0)})
+    return out
+
+
+def build_recorder_template(manual_name: str, placeholders: list[dict]) -> dict:
+    """Generate a recorder script template the LLM agent can fill in.
+
+    Template fields the LLM must fill:
+      - url: target application URL (e.g. https://app.example.com)
+      - auth_env: list of env var names for login creds
+      - steps: ordered list of {action: ...} dicts
+
+    Screenshots from the manual become explicit "screenshot" steps. Videos
+    become "video_start" / "video_stop" pairs surrounding the relevant steps.
+    """
+    return {
+        "_doc": (
+            f"Recorder script template generated for {manual_name}. "
+            "The LLM agent must fill in `url`, `auth_env`, and flesh out each "
+            "`steps` entry with concrete CSS selectors / text. Then run via "
+            "`python3 -m recorder_plugin.cli run <this-file>.json` (requires the "
+            "recorder opt-in plugin; see recorder/INSTALL.md). After it finishes, "
+            "produce a mapping JSON {placeholder_name: real_asset_path} and run "
+            "`record-manual <manual.md> --apply-mapping <mapping.json>`."
+        ),
+        "name": manual_name,
+        "url": "<TODO: target URL>",
+        "viewport": {"width": 1440, "height": 900},
+        "output_dir": f"docs/user-manual/screenshots/<TODO: domain>",
+        "auth_env": ["AUTH_USER", "AUTH_PASS", "AUTH_TOTP_SECRET"],
+        "steps": [
+            {"action": "navigate", "url": "/<TODO: starting route>"},
+            {"action": "wait_for", "strategy": "networkidle"},
+            *_step_template_lines(placeholders),
+        ],
+    }
+
+
+def _step_template_lines(placeholders: list[dict]) -> list[dict]:
+    """Convert placeholders into ordered recorder step stubs.
+
+    Each screenshot → one `screenshot` step. Each video → a video_start /
+    / video_stop pair surrounding the closest preceding screenshot.
+    """
+    out = []
+    last_video_started = False
+    for p in placeholders:
+        if p["kind"] == "screenshot":
+            out.append({
+                "action": "screenshot",
+                "name": p["name"],
+                "annotate": [{"shape": "box", "x": 0, "y": 0, "w": 200, "h": 50,
+                              "label": "<TODO: caption>"}],
+            })
+        elif p["kind"] == "video":
+            if not last_video_started:
+                out.append({"action": "video_start", "name": p["name"]})
+                last_video_started = True
+            else:
+                # Multiple videos in a row: stop the previous before starting the next
+                out.append({"action": "video_stop", "name": f"<TODO: previous-video>"})
+                out.append({"action": "video_start", "name": p["name"]})
+    if last_video_started:
+        out.append({"action": "video_stop", "name": "<TODO: last-video>"})
+    return out
+
+
+def apply_recording_mapping(text: str, mapping: dict) -> tuple[str, dict, list]:
+    """Replace placeholders in text with real asset paths from mapping.
+
+    Returns (new_text, replaced, missing).
+      - replaced: {placeholder_name: real_path} for the ones that were replaced
+      - missing: list of placeholder names whose names didn't appear in mapping
+    """
+    replaced = {}
+    missing = []
+    # Build a per-name regex: matches [SCREENSHOT: <name>.*] and [VIDEO: <name>.*]
+    for name, real_path in mapping.items():
+        pattern = re.compile(
+            rf"\[(?P<kind>SCREENSHOT|VIDEO)(?:\s+NEEDED)?\s*:\s*{re.escape(name)}(?:\.\w+)?\]"
+        )
+        if pattern.search(text):
+            new_text, n = pattern.subn(f"![{name}]({real_path})", text, count=1)
+            text = new_text
+            replaced[name] = real_path
+    # Now find which placeholder names in the remaining text have no mapping entry
+    remaining = scan_recording_placeholders(text)
+    for p in remaining:
+        if p["name"] not in mapping:
+            missing.append(p["name"])
+    return text, replaced, missing
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 2 or argv[1] in ("--help", "-h", "help"):
         print(__doc__)
@@ -1002,6 +1227,9 @@ def main(argv: list[str]) -> int:
         json.dump(result, sys.stdout, indent=2)
         sys.stdout.write("\n")
         return 0
+
+    if cmd == "record-manual":
+        return cmd_record_manual(argv[2:])
 
     if cmd == "html-template-version":
         print(html_template_version())

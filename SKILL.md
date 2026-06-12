@@ -604,4 +604,72 @@ When the target project has the `recorder` opt-in plugin installed, assets are p
 
 The recorder produces files matching the `<domain>-<task>-<element>.png` naming convention in §1 above; these files drop directly into task card `[SCREENSHOT: ...]` slots. For video, the recorder emits a list of 10-second slices; the task card references the manifest.
 
+## 14. 录屏阶段 (recording phase) — v0.2.3 新增
+
+**This section is mandatory for the LLM agent.** A manual full of `[SCREENSHOT: x]` placeholders is **not** a finished manual — it's a draft. The recording phase fills those placeholders with real assets.
+
+### When this section applies
+
+After §5 (write the manual markdown), the agent must run §14 if the project is a **web app** with a runnable dev/staging environment. Skip if:
+- The project is a desktop app, CLI tool, or pure API (no UI to record).
+- The user explicitly says "skip recording" or "manual only".
+
+### The 3-option flow
+
+The LLM agent must ask the user **once** which mode to use, with a default of "record":
+
+1. **`record`** (default) — record screenshots AND video for the key steps. Requires: target URL, login credentials (env var names), which steps are "key" (the rest get screenshots only).
+2. **`screenshot-only`** — record screenshots but skip video. Lighter, faster.
+3. **`skip`** — leave the placeholders in place. User will fill them later by hand or with another tool.
+
+### Workflow (mode = `record` or `screenshot-only`)
+
+```
+1. LLM agent runs:
+   python3 -m manual_helper record-manual <path-to-manual.md>
+   # → prints: "RECORDING_NEEDED: N screenshots, M videos"
+
+2. (Optional) LLM agent asks user for URL + creds, then runs:
+   python3 -m manual_helper record-manual <path> --generate-template <out.json>
+   # → emits a recorder script template the agent fills in
+
+3. LLM agent invokes the recorder opt-in plugin to record.
+   The recorder (see recorder/SKILL.md) is opt-in — if it's not installed,
+   this step fails. The user must `pip install -e recorder/[test]` per
+   recorder/INSTALL.md and re-run.
+
+4. After recording finishes, the recorder produced real .png / .mp4 files.
+   The LLM agent produces a mapping JSON:
+   {
+     "01-list": "docs/user-manual/screenshots/sys/01-list.png",
+     "demo-flow": "docs/user-manual/screenshots/sys/demo-flow.mp4"
+   }
+
+5. LLM agent runs:
+   python3 -m manual_helper record-manual <path> --apply-mapping <mapping.json>
+   # → replaces [SCREENSHOT: x] / [VIDEO: x] placeholders with ![x](path) markdown
+   # → prints "replaced: N placeholders, placeholders still missing: M"
+   # → if M > 0, the agent must decide: re-run recorder for missing, or
+   #   accept the gap (call them out in the manual's "Open Questions" section)
+```
+
+### Helper subcommand reference
+
+| Subcommand | Purpose |
+|---|---|
+| `record-manual <manual.md>` | Scan and report placeholders. Exits 0 always; never modifies the manual. |
+| `record-manual <manual.md> --generate-template <out.json>` | Same, plus emit a recorder script template the LLM agent fills in. |
+| `record-manual <manual.md> --apply-mapping <mapping.json>` | Replace placeholders with real paths from the mapping. Writes the manual back. |
+
+### What this section explicitly does NOT do
+
+- It does **not** automatically detect the project's dev environment.
+- It does **not** generate a recording script for the LLM (only a template).
+- It does **not** run the recorder itself — that's the LLM agent's job.
+- It does **not** decide which steps get video vs. screenshot — the LLM agent does that.
+
+### Why deterministic
+
+The recording phase has 3 deterministic primitives (scan, generate-template, apply-mapping) because those are easy to get wrong in prose. The LLM-heavy work (running the recorder, picking selectors, handling login state) stays in the LLM agent loop where it belongs.
+
 代价是结构强约束:手册位置固定,7 段(11 段 + 附录)固定,Citations 格式固定。**正是这种结构让幂等成为可能** — 不固定,每次跑都要重新推导。
