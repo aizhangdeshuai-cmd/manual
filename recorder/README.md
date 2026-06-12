@@ -2,7 +2,7 @@
 
 Drives a Chromium browser via Playwright to produce task-card screenshots and videos for the [user-manual skill](../SKILL.md).
 
-**Status:** Opt-in plugin, v0.1.0. Not part of the core user-manual skill.
+**Status:** Opt-in plugin, v0.2.4. Not part of the core user-manual skill.
 
 **Supports:** macOS, Linux (Ubuntu LTS). Windows is not supported in v1.
 

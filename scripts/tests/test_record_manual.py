@@ -524,6 +524,29 @@ class RecordManualTests(unittest.TestCase):
         finally:
             os.unlink(md)
 
+    # === v0.2.4 audit round 3: M2 (record-manual usage on bad flag) ===
+
+    def test_record_manual_unknown_flag_prints_usage(self):
+        """M2: a bad flag on record-manual must print a usage line on
+        stderr (matching the other subcommands at line 1307, 1335, 1363)."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write("# Manual\n")
+            md = f.name
+        try:
+            r = run(["record-manual", md, "--bogus-flag"])
+            # M2: exit 2 (bad arg) and stderr must mention usage
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("usage: record-manual", r.stderr)
+            self.assertIn("--bogus-flag", r.stderr)
+        finally:
+            os.unlink(md)
+
+    def test_record_manual_help_flag_prints_usage(self):
+        """M2: --help on record-manual prints usage, exits 0."""
+        r = run(["record-manual", "--help"])
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("usage: record-manual", r.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

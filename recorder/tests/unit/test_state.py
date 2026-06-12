@@ -127,3 +127,30 @@ def test_atomic_write_json_dir_fsync_is_best_effort(tmp_path):
         atomic_write_json(f, {"b": 2})
     # File must still be written successfully
     assert json.loads(f.read_text()) == {"b": 2}
+
+
+# === v0.2.4 audit round 3: M1 (flock startup-guard) ===
+
+def test_file_lock_raises_recorder_state_locked_when_held(tmp_path):
+    """M1: a second acquire on a held lock must raise a clear
+    RecorderStateLocked error (not block forever) so the agent loop
+    can detect parallel invocations and warn the user."""
+    from recorder_plugin.state import RecorderStateLocked
+    f = tmp_path / "lock.file"
+    with file_lock(f):
+        # Second acquire attempt while the first holds the lock
+        with pytest.raises(RecorderStateLocked) as exc:
+            with file_lock(f):
+                pass
+        assert "held by another live process" in str(exc.value)
+
+
+def test_file_lock_releases_after_context_exit(tmp_path):
+    """M1: after the context exits, the lock is released. A subsequent
+    acquire on the same lock must succeed (no lock leak)."""
+    f = tmp_path / "lock.file"
+    with file_lock(f):
+        pass
+    # Re-acquire: should not raise
+    with file_lock(f):
+        pass

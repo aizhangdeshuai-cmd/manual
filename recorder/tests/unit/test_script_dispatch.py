@@ -114,3 +114,48 @@ def test_script_module_imports_sys():
     assert hasattr(s, "sys"), "recorder_plugin.script must have `sys` attribute"
     import sys
     assert s.sys is sys
+
+
+# === v0.2.4 audit round 3: M4 (json.loads error handling) + L1 ===
+
+def test_run_script_returns_error_envelope_on_missing_file():
+    """M4: a missing script file must return a JSON-shaped error envelope
+    (status='error', errors=[...]) instead of crashing asyncio.run
+    with an uncaught FileNotFoundError."""
+    import asyncio
+    from recorder_plugin.script import run_script
+    result = asyncio.run(run_script(Path("/tmp/this/does/not/exist/anywhere.json")))
+    assert result["status"] == "error"
+    assert any("not found" in e["error"] for e in result["errors"])
+
+
+def test_run_script_returns_error_envelope_on_corrupt_json(tmp_path):
+    """M4: a script that is not valid JSON must return a clean error
+    envelope, not an uncaught JSONDecodeError."""
+    import asyncio
+    bad = tmp_path / "bad.json"
+    bad.write_text("not json at all {")
+    from recorder_plugin.script import run_script
+    result = asyncio.run(run_script(bad))
+    assert result["status"] == "error"
+    assert any("parse" in e["error"].lower() or "decode" in e["error"].lower()
+               for e in result["errors"])
+
+
+def test_to_kebab_emits_warning_on_normalization_collision():
+    """L1: distinct inputs that collapse to the same kebab form
+    ('01 List', '01-List', '01List') must emit a stderr warning so
+    the user knows their file will overwrite a previous step's."""
+    import sys
+    from recorder_plugin.script import _to_kebab
+    # Capture stderr
+    import io
+    captured = io.StringIO()
+    old_stderr = sys.stderr
+    sys.stderr = captured
+    try:
+        _to_kebab("01 List")
+    finally:
+        sys.stderr = old_stderr
+    assert "01-list" in captured.getvalue()
+    assert "01 List" in captured.getvalue()

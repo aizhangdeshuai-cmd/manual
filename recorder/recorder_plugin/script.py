@@ -32,8 +32,23 @@ def _step_hash(step: dict, script_hash: str) -> str:
 
 
 def _to_kebab(name: str) -> str:
-    """Convert '01 List' or '01List' to '01-list' for filename consistency."""
+    """Convert '01 List' or '01List' to '01-list' for filename consistency.
+
+    v0.2.4 audit round 3 (L1): distinct inputs that differ only in
+    separators / case ('01 List', '01-List', '01List', '01_list') all
+    collapse to the same kebab form ('01-list'). The recorder emits
+    a stderr warning whenever the input had any character outside the
+    kebab charset, so the user knows their file was renamed. This
+    avoids false positives on already-kebab names like '01-list'.
+    """
     s = re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-").lower()
+    if re.search(r"[^a-z0-9-]", name):
+        print(
+            f"WARNING: step name {name!r} was normalized to {s!r} for the "
+            f"output filename. If this collides with another step's name, "
+            f"the second will overwrite the first on disk.",
+            file=sys.stderr,
+        )
     return s or "unnamed"
 
 
@@ -273,7 +288,26 @@ async def _handle_video_stop(
 async def run_script(script_path: Path) -> dict:
     """Execute a declarative JSON script. Returns the output dict (per spec §6.2)."""
     script_path = Path(script_path)
-    data = json.loads(script_path.read_text())
+    # M4 fix (v0.2.4 audit round 3): wrap the script load in
+    # try/except so a corrupt or missing script returns a clean
+    # JSON error envelope instead of an uncaught traceback. The
+    # dispatch loop already has its own try/except per step, but
+    # this load is OUTSIDE the loop and would crash asyncio.run.
+    try:
+        script_data = json.loads(script_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {
+            "script": script_path.stem, "status": "error",
+            "errors": [{"step": -1, "action": "load",
+                        "error": f"script file not found: {script_path}"}],
+        }
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+        return {
+            "script": script_path.stem, "status": "error",
+            "errors": [{"step": -1, "action": "load",
+                        "error": f"could not parse script: {type(e).__name__}: {e}"}],
+        }
+    data = script_data
     script_name = data.get("name", script_path.stem)
     output_dir = Path(data.get("output_dir", "."))
     output_dir.mkdir(parents=True, exist_ok=True)

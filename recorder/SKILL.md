@@ -15,8 +15,8 @@ Before running the recorder, the host environment must have:
 
 | Requirement | Min version | How to verify | Notes |
 |---|---|---|---|
-| Python | 3.10+ | `python3 --version` | Tests pass on 3.10-3.15 |
-| `playwright` (pip) | 1.40 - 1.59 | `python3 -c "import playwright; print(playwright.__version__)"` | Provided by `pip install -e .` in `INSTALL.md` |
+| Python | 3.10+ | `python3 --version` | Tests pass on 3.10-3.13 |
+| `playwright` (pip) | ≥1.40 (see `pyproject.toml` for upper bound) | `python3 -c "import playwright; print(playwright.__version__)"` | Provided by `pip install -e .` in `INSTALL.md` |
 | `Pillow` (pip) | 10.0+ | `python3 -c "import PIL; print(PIL.__version__)"` | Annotation rendering |
 | `mcp` (pip) | 1.0+ | `python3 -c "import mcp"` | Only needed for MCP server mode |
 | `ffmpeg` (system) | 4.4+ | `ffmpeg -version` | Video slicing + concat |
@@ -87,6 +87,43 @@ Protocol:
    which reads each response, applies Pillow annotations, writes `<name>.ai-annotated.png`, and deletes the request file.
 
 **This means**: zero provider lock-in, zero double-billing. The recorder pays for nothing; vision is fulfilled by whichever model the user's harness already provides.
+
+### `apply-ai-responses` return contract (v0.2.4 audit round 3, H5)
+
+When the agent loop calls `python -m recorder_plugin.cli apply-ai-responses <output-dir>`, each request produces one of these statuses:
+
+| Status | Meaning | Agent action |
+|---|---|---|
+| `applied` | The annotation was applied; PNG written; request file deleted. | Continue. |
+| `skipped_missing_image` | The source PNG referenced by the request does not exist. | **Re-run the screenshot step** (or check why the file was deleted), then re-invoke. |
+| `skipped_missing_response` | The request file is there but no `.ai_annotation_response_*.json` exists yet. | **Write the response file using your own LLM**, then re-invoke. **Do not retry the CLI in a tight loop** — it will exit 1 every time until you produce the response. |
+| `skipped_invalid_response` | The response file exists but is not valid JSON. | **Overwrite the response file** with valid JSON, then re-invoke. |
+| `skipped_unsupported_schema` | The request file's `schema_version` is missing or newer than what this recorder understands. | The recorder and the agent must agree on the schema; check for a version mismatch in the harness. |
+| `skipped_image_unreadable` | The source PNG is corrupt (UnidentifiedImageError). | Re-take the screenshot; do not retry. |
+
+The CLI aggregates all results and **exits 1 if any request was skipped**. The agent loop must read each `skipped` entry's `status` field to decide whether to (a) produce a response, (b) overwrite an existing one, or (c) re-run a screenshot.
+
+### TOTP drift override (v0.2.4 audit round 3, H4)
+
+The recorder's `TOTP_WINDOW_DRIFT` constant defaults to **2** (accept the current TOTP window ±2 = 5 candidate codes). This tolerates network latency and the time the auth page takes to render the TOTP input.
+
+Override per-script via the `LoginStep.totp_drift_seconds` field:
+
+```json
+{
+  "action": "login",
+  "url": "https://app.example.com/login",
+  "user_field": "input[name='u']",
+  "user": "$AUTH_USER",
+  "pass_field": "input[name='p']",
+  "pass": "$AUTH_PASS",
+  "submit_selector": "button[type='submit']",
+  "totp_secret": "$AUTH_TOTP_SECRET",
+  "totp_drift_seconds": 3
+}
+```
+
+A value of 0 means "current window only" (no drift tolerance). The recorder picks `codes[drift]` (the center of the candidate list) and submits it. If the server rejects the code as expired, the recorder does NOT retry — the agent loop must decide retry policy.
 
 ### `wait_for` strategies (v1 whitelist)
 

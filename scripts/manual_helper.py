@@ -938,6 +938,15 @@ def cmd_record_manual(args):
       }
     Keys are the placeholder name (without extension or brackets).
     """
+    # M2 fix (v0.2.4 audit round 3): --help prints usage and exits 0
+    # BEFORE the manual_path check (so "--help" is not interpreted
+    # as a missing-manual path). Matches the help-flag convention
+    # of the other subcommands.
+    if args and args[0] in ("--help", "-h", "help"):
+        print("usage: record-manual <manual.md> [--generate-template <out>] [--apply-mapping <json>]",
+              file=sys.stderr)
+        return 0
+
     if not args:
         print("usage: record-manual <manual.md> [--generate-template <out>] [--apply-mapping <json>]",
               file=sys.stderr)
@@ -959,7 +968,13 @@ def cmd_record_manual(args):
             apply_mapping = Path(args[i + 1])
             i += 2
         else:
+            # M2 fix (v0.2.4 audit round 3): print the usage line on
+            # the same stderr message so a user who fat-fingers a
+            # flag gets recovery context (matching other subcommands
+            # at line 1307, 1335, 1363).
             print(f"error: unknown arg {args[i]!r}", file=sys.stderr)
+            print("usage: record-manual <manual.md> [--generate-template <out>] [--apply-mapping <json>]",
+                  file=sys.stderr)
             return 2
 
     text = manual_path.read_text(encoding="utf-8", errors="replace")

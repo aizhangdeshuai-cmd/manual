@@ -55,16 +55,48 @@ def atomic_write_json(path: Path, data: dict) -> None:
 
 @contextmanager
 def file_lock(lock_path: Path) -> Iterator[None]:
-    """Acquire an exclusive flock on `lock_path`. Releases on context exit."""
+    """Acquire an exclusive flock on `lock_path`. Releases on context exit.
+
+    v0.2.4 audit round 3 (M1): a non-blocking probe is performed first.
+    If another process already holds the lock, raise a clear
+    `RecorderStateLocked` error instead of blocking forever. The
+    caller (RecorderState) translates this into a warning, since
+    parallel invocations of the same script on the same output_dir
+    are not a supported pattern.
+    """
     lock_path = Path(lock_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as e:
+            os.close(fd)
+            raise RecorderStateLocked(
+                f"state lock {lock_path} is held by another live process. "
+                f"Concurrent invocations of the same recorder script on the "
+                f"same output_dir are not supported (would race on the "
+                f"state file)."
+            ) from e
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+    except RecorderStateLocked:
+        raise
+    except Exception:
+        # If anything else fails mid-yield, still release the lock
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except Exception:
+            pass
         os.close(fd)
+        raise
+
+
+class RecorderStateLocked(RuntimeError):
+    """Raised when the state file is held by another live process."""
 
 
 class RecorderState:

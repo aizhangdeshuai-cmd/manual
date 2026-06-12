@@ -112,7 +112,25 @@ git revert <commit-sh-that-amended-CONTRIBUTING-and-SKILL>
 rm .github/workflows/recorder-ci.yml
 
 # 4. Uninstall pip packages added/used by recorder
+
+# Direct deps (the ones the user explicitly asked for)
 pip uninstall playwright Pillow mcp pytest pytest-asyncio
+
+# Transitives (auto-installed by `pip install -e .[test]`)
+# v0.2.4 audit round 3 (M3): use pip-autoremove to purge transitives
+# in one command, rather than listing 7+ packages individually. The
+# user's hard rule is "record everything so I can remove it cleanly"
+# — this satisfies that rule without making the log brittle to
+# version drift.
+if command -v pip-autoremove >/dev/null 2>&1; then
+    pip-autoremove playwright Pillow mcp pytest pytest-asyncio -y
+else
+    # Fallback: list the transitives we know about. Version-pinned
+    # paths are intentionally not used; we uninstall by package name.
+    pip uninstall -y pydantic pydantic-settings httpx-sse jsonschema \
+        cryptography starlette sse-starlette typing-extensions \
+        annotated-types 2>/dev/null || true
+fi
 
 # 5. Remove Chromium browser
 python3 -m playwright uninstall chromium
