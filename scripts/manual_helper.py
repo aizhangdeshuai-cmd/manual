@@ -252,17 +252,39 @@ def init_skill(project_root: Path) -> dict:
             encoding="utf-8",
         )
         created.append(str(idx.relative_to(root)))
-    # Hard-fail on missing personas.json (v2 D1)
+    # v0.2.2: when personas.json missing, scaffold from examples/personas.template.json
+    # (was: hard FileNotFoundError — first-time users hit a wall).
     personas_path = root / "docs" / "user-manual" / "personas.json"
     if not personas_path.exists():
-        template = root / "docs" / "user-manual" / "skill-template" / "examples" / "personas.template.json"
-        raise FileNotFoundError(
-            f"personas.json is required at {personas_path}.\n"
-            f"Copy the domain-neutral template from {template}, "
-            f"edit for your project, then re-run init-skill.\n"
-            f"See SKILL.md section 1 (file location) and section 5 (LLM prompt flow)."
-        )
-    return {"created": created, "skipped": skipped, "personas_required": str(personas_path.relative_to(root))}
+        # Try a few candidate locations for the template
+        template_candidates = [
+            # The user-manual skill's examples/ dir (shipped with the skill)
+            Path(__file__).parent.parent / "examples" / "personas.template.json",
+            # Legacy path used by older init-skill versions
+            root / "docs" / "user-manual" / "skill-template" / "examples" / "personas.template.json",
+        ]
+        template = next((p for p in template_candidates if p.exists()), None)
+        if template is None:
+            raise FileNotFoundError(
+                "personas.json not found at {} and no template available at:\n  {}".format(
+                    personas_path, "\n  ".join(str(p) for p in template_candidates)
+                )
+            )
+        # Scaffold: copy the template, then print a loud warning
+        import shutil
+        personas_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(template, personas_path)
+        created.append(str(personas_path.relative_to(root)))
+        # Prominent stderr warning so the user sees it
+        print("=" * 70, file=sys.stderr)
+        print("⚠️  personas.json was MISSING — scaffolded from template.", file=sys.stderr)
+        print("    Created: {}".format(personas_path), file=sys.stderr)
+        print("", file=sys.stderr)
+        print("    NEXT STEP: edit personas.json to match your project's real", file=sys.stderr)
+        print("    roles, then re-run `python3 -m manual_helper validate-config`.", file=sys.stderr)
+        print("    (Running with the 5 default personas is fine for a first pass.)", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+    return {"created": created, "skipped": skipped, "personas_scaffolded": str(personas_path.relative_to(root))}
 
 
 # ---------- Config validation (v2 D1) ----------

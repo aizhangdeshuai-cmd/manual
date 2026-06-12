@@ -42,6 +42,10 @@ class ExtractTasksTests(unittest.TestCase):
             self.assertEqual(t["steps"][0], "打开字典管理页")
 
     def test_fallback_to_h2_with_bullets(self):
+        """v0.2.2: fallback still works but requires >=3 bullets per section
+        AND at least one bullet starting with an action verb. Sections like
+        "Architecture" (bullets: 'Uses React', 'Why we chose Postgres') are
+        filtered out because none of their bullets start with an action verb."""
         with tempfile.TemporaryDirectory() as d:
             spec = Path(d) / "spec.md"
             spec.write_text(textwrap.dedent("""\
@@ -50,17 +54,60 @@ class ExtractTasksTests(unittest.TestCase):
                 ## 创建字典分类
                 这是个普通 H2,没"用户故事"前缀。
 
-                - 步骤 1
-                - 步骤 2
+                - 打开字典管理
+                - 点击「新增分类」
+                - 填写分类名称
+                - 提交
 
                 ## 另一节
-                - 步骤 A
-                - 步骤 B
+                - 打开另一节管理
+                - 点击「新增项」
+                - 提交另一节数据
             """), encoding="utf-8")
             r = subprocess.run([sys.executable, str(SCRIPT), str(spec)], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0)
             tasks = json.loads(r.stdout)
-            self.assertGreaterEqual(len(tasks), 2)
+            # Both sections have 3+ bullets and start with action verbs → both picked up
+            self.assertGreaterEqual(len(tasks), 2, f"expected >=2 task candidates, got {len(tasks)}: {tasks}")
+
+    def test_fallback_filters_non_task_sections(self):
+        """v0.2.2 regression: 'Architecture' / 'Data Model' sections with non-action
+        bullets must NOT become task candidates in fallback mode."""
+        with tempfile.TemporaryDirectory() as d:
+            spec = Path(d) / "spec.md"
+            spec.write_text(textwrap.dedent("""\
+                # 设计
+
+                ## Architecture
+                We chose these tools.
+
+                - Uses React for the frontend
+                - Postgres for persistence
+                - Why we chose Redis for caching
+
+                ## Data Model
+                The schema looks like this.
+
+                - User has many Posts
+                - Each Post belongs to a User
+                - Categories form a tree
+
+                ## 创建字典分类
+                Real task below.
+
+                - 打开字典管理
+                - 点击「新增分类」
+                - 填写分类名称
+            """), encoding="utf-8")
+            r = subprocess.run([sys.executable, str(SCRIPT), str(spec)], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0)
+            tasks = json.loads(r.stdout)
+            task_names = [t["task_name"] for t in tasks]
+            # Architecture and Data Model should be filtered out (no action verbs)
+            assert "Architecture" not in task_names, f"Architecture should be filtered: {task_names}"
+            assert "Data Model" not in task_names, f"Data Model should be filtered: {task_names}"
+            # Only the real task survives
+            assert any("创建字典分类" in n for n in task_names), f"real task missing: {task_names}"
 
     def test_persona_detection(self):
         with tempfile.TemporaryDirectory() as d:
