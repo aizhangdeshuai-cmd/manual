@@ -48,12 +48,18 @@ def main(argv: list[str]) -> int:
             r = apply_response(req, resp, out_dir)
             results.append(r)
         applied = [r for r in results if r["status"] == "applied"]
-        skipped = [r for r in results if r["status"] == "skipped"]
+        # I12: surface all non-applied statuses separately. The agent loop
+        # uses these tags to decide retry strategy (write response vs fix
+        # existing JSON vs delete corrupt image vs bump schema).
+        skip_statuses = (
+            "skipped_missing_image", "skipped_missing_response",
+            "skipped_invalid_response", "skipped_unsupported_schema",
+            "skipped_image_unreadable",
+        )
+        skipped = [r for r in results if r["status"] in skip_statuses]
         print(json.dumps({"applied": applied, "skipped": skipped},
                         indent=2, default=str))
         # v0.2.4 audit fix: any-skipped → exit 1 so the agent notices failures.
-        # all([]) is True in Python, so we have to handle the "all skipped" case
-        # explicitly — otherwise the agent would think everything succeeded.
         if skipped:
             return 1
         return 0

@@ -62,7 +62,7 @@ python3 -m recorder_plugin.cli run examples/sample_script.json
 
 ## Script schema (declarative mode)
 
-See `examples/sample_script.json` for a complete example. The 12 step actions:
+See `examples/sample_script.json` for a complete example. The 10 step actions:
 `navigate`, `click`, `type`, `wait_for`, `screenshot`, `login`, `video_start`, `video_stop`, `set_viewport`, `ai_annotate` (v0.2.4: request/response — see §14 below).
 
 The `video_stop` step produces a single MP4 (concat of N 10s webm slices) via `video.concat_slices_to_mp4`. State-tracked across re-runs: a script with the same name will skip the video session if it was already validated.

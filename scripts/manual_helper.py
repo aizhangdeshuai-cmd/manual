@@ -965,23 +965,34 @@ def cmd_record_manual(args):
     text = manual_path.read_text(encoding="utf-8", errors="replace")
     placeholders = scan_recording_placeholders(text)
 
-    # --apply-mapping: replace and write back
+    # --apply-mapping: replace and write back atomically
     if apply_mapping is not None:
         if not apply_mapping.exists():
             print(f"error: mapping file {apply_mapping} not found", file=sys.stderr)
             return 1
         mapping = json.loads(apply_mapping.read_text())
-        new_text, replaced, missing = apply_recording_mapping(text, mapping)
-        manual_path.write_text(new_text, encoding="utf-8")
+        new_text, replaced, missing, replaced_instances = apply_recording_mapping(text, mapping)
+        # F9 fix (v0.2.4 audit): write to a temp file in the same directory
+        # then atomically rename. A crash mid-write used to truncate the
+        # manual to half-applied state. tmp in same dir guarantees the
+        # rename is on the same filesystem (POSIX rename is atomic).
+        tmp_path = manual_path.with_suffix(manual_path.suffix + ".tmp")
+        tmp_path.write_text(new_text, encoding="utf-8")
+        tmp_path.replace(manual_path)
         print(f"updated: {manual_path}")
-        print(f"  replaced: {len(replaced)} placeholders")
+        print(f"  replaced: {len(replaced)} unique mappings "
+              f"({replaced_instances} placeholder instances)")
         if replaced:
             for k, v in sorted(replaced.items()):
                 print(f"    [SCREENSHOT: {k}.*] / [VIDEO: {k}.*]  ->  {v}")
         if missing:
             print(f"  placeholders still missing: {len(missing)}")
-            for name in missing:
-                print(f"    [SCREENSHOT: {name}.*] / [VIDEO: {name}.*]  (no mapping)")
+            for entry in missing:
+                kind_marker = entry["kind"]
+                status = entry.get("status", "no_mapping")
+                print(f"    [{kind_marker.upper().replace('_', ' ')}: {entry['name']}]  ({status})")
+                if entry.get("reason"):
+                    print(f"      reason: {entry['reason']}")
         return 0
 
     # Default: report
@@ -1026,9 +1037,27 @@ def cmd_record_manual(args):
 #   [VIDEO: <name>.mp4]         [VIDEO NEEDED: <name>.mp4]
 #   [AI ANNOTATE: <name>]        v0.2.4: agent-mediated vision annotation
 # All three kinds live in the same scan + apply-mapping pipeline.
+#
+# I11 fix (v0.2.4 audit): name supports multi-segment identifiers like
+# "v1.2" or "settings.modal". An optional trailing image/video extension
+# (.png / .mp4 / .jpg / .webm / .gif / .mov) is recognized and stripped
+# in scan, so mapping keys stay bare ("01-list", "v1.2-heatmap").
+_KNOWN_EXTS = ("png", "mp4", "jpg", "jpeg", "webm", "gif", "mov")
 _PLACEHOLDER_RE = re.compile(
-    r"\[(?P<kind>SCREENSHOT|VIDEO|AI\s+ANNOTATE)(?:\s+NEEDED)?\s*:\s*(?P<name>[A-Za-z0-9_\-]+)(?:\.\w+)?\]"
+    r"\[(?P<kind>SCREENSHOT|VIDEO|AI\s+ANNOTATE)"
+    r"(?P<needed>\s+NEEDED)?\s*:\s*"
+    r"(?P<name>[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)*)"
+    r"(?:\.(?P<ext>png|mp4|jpg|jpeg|webm|gif|mov))?"
+    r"\]"
 )
+
+
+def _strip_ext(name: str) -> str:
+    """Strip a trailing image/video extension if present (I11)."""
+    parts = name.split(".")
+    if len(parts) > 1 and parts[-1].lower() in _KNOWN_EXTS:
+        return ".".join(parts[:-1])
+    return name
 
 
 def scan_recording_placeholders(text: str) -> list[dict]:
@@ -1043,8 +1072,17 @@ def scan_recording_placeholders(text: str) -> list[dict]:
     the agent fulfills it via its own LLM, recorder applies Pillow
     annotation on re-run of `apply-ai-responses`.
 
+    v0.2.4 (I11): multi-segment placeholder names like "v1.2-heatmap"
+    or "settings.modal" are now supported.
+
+    v0.2.4 (G): each result carries a `needed` boolean (true when the
+    user wrote `[... NEEDED: x]`, false for the plain `[...: x]` form).
+    Downstream missing-list reports use it to distinguish
+    `user_declared_needed` (the user explicitly said "this is missing")
+    from `no_mapping` (plain placeholder, may or may not be needed).
+
     Returns list of {"kind": "screenshot"|"video"|"ai_annotate", "name": str,
-                    "line": int, "raw": str}.
+                    "line": int, "raw": str, "needed": bool}.
     """
     out = []
     in_code = False
@@ -1055,14 +1093,20 @@ def scan_recording_placeholders(text: str) -> list[dict]:
         if in_code:
             continue
         for m in _PLACEHOLDER_RE.finditer(line):
-            kind_raw = m.group("kind").replace(" ", "").lower()  # "AIANNOTATE" → "aiannotate"
+            kind_raw = m.group("kind").replace(" ", "").lower()
             if kind_raw == "aiannotate":
                 kind = "ai_annotate"
             elif kind_raw == "video":
                 kind = "video"
             else:
                 kind = "screenshot"
-            out.append({"kind": kind, "name": m.group("name"), "line": i, "raw": m.group(0)})
+            out.append({
+                "kind": kind,
+                "name": _strip_ext(m.group("name")),
+                "line": i,
+                "raw": m.group(0),
+                "needed": m.group("needed") is not None,
+            })
     return out
 
 
@@ -1094,7 +1138,12 @@ def build_recorder_template(manual_name: str, placeholders: list[dict]) -> dict:
         "url": "<TODO: target URL>",
         "viewport": {"width": 1440, "height": 900},
         "output_dir": f"docs/user-manual/screenshots/<TODO: domain>",
-        "auth_env": ["AUTH_USER", "AUTH_PASS", "AUTH_TOTP_SECRET"],
+        # C fix (v0.2.4 audit): the recorder's resolve_credential() only
+        # expands values that start with "$". Bare names like "AUTH_USER"
+        # would be passed through as the literal string "AUTH_USER" and
+        # submitted to the login form. The $ prefix tells the recorder
+        # to look up the env var. Without it, login silently fails.
+        "auth_env": ["$AUTH_USER", "$AUTH_PASS", "$AUTH_TOTP_SECRET"],
         "steps": [
             {"action": "navigate", "url": "/<TODO: starting route>"},
             {"action": "wait_for", "strategy": "networkidle"},
@@ -1140,7 +1189,7 @@ def _step_template_lines(placeholders: list[dict]) -> list[dict]:
     return out
 
 
-def apply_recording_mapping(text: str, mapping: dict) -> tuple[str, dict, list]:
+def apply_recording_mapping(text: str, mapping: dict) -> tuple[str, dict, list, int]:
     """Replace placeholders in text with real asset paths from mapping.
 
     Recognizes all 3 placeholder kinds (SCREENSHOT, VIDEO, AI ANNOTATE).
@@ -1161,22 +1210,51 @@ def apply_recording_mapping(text: str, mapping: dict) -> tuple[str, dict, list]:
     mapping. If only a plain-name mapping exists for the same name, that's
     a config error and the AI ANNOTATE is reported in missing (with
     explicit reason) instead of being silently dropped.
+
+    I11 fix (v0.2.4 audit): multi-segment placeholder names like
+    "v1.2-heatmap" are supported. The pattern uses re.escape(name)
+    followed by an optional extension.
+
+    I14 fix (v0.2.4 audit): the 4th tuple element is the count of
+    placeholder INSTANCES replaced (not unique mapping keys). One
+    mapping key may replace 2+ instances if the placeholder appears
+    in multiple task cards.
+
+    G fix (v0.2.4 audit): each missing entry now carries a `status`
+    field, one of:
+      - "no_mapping": placeholder exists in the manual but no mapping
+        key was provided. The user wrote plain `[...: x]` (not NEEDED).
+      - "user_declared_needed": user wrote `[... NEEDED: x]`, explicitly
+        flagging that this placeholder MUST be replaced. The agent loop
+        should prioritize these over plain missing.
+      - "wrong_mapping_type": AI ANNOTATE placeholder was given a plain
+        name mapping key (should be `ai-annotated-` prefixed).
+
+    Returns: (new_text, replaced, missing, replaced_instances)
+      - replaced: {mapping_key: real_path} — unique keys that had at
+        least one match
+      - missing: list of {name, kind, status, reason} for placeholders
+        that survived the substitution
+      - replaced_instances: total count of placeholder occurrences
+        replaced (can exceed len(replaced) if same key appears 2+ times)
     """
     reemplazado = {}
     missing = []
+    replaced_instances = 0
     for key, real_path in mapping.items():
         if key.startswith("ai-annotated-"):
             name = key[len("ai-annotated-"):]
-            pattern = re.compile(rf"\[AI\s+ANNOTATE\s*:\s*{re.escape(name)}(?:\.\w+)?\]")
+            pattern = re.compile(rf"\[AI\s+ANNOTATE\s*:\s*{re.escape(name)}(?:\.[A-Za-z0-9]+)?\]")
         else:
             name = key
             pattern = re.compile(
-                rf"\[(?P<kind>SCREENSHOT|VIDEO)(?:\s+NEEDED)?\s*:\s*{re.escape(name)}(?:\.\w+)?\]"
+                rf"\[(?P<kind>SCREENSHOT|VIDEO)(?:\s+NEEDED)?\s*:\s*{re.escape(name)}(?:\.[A-Za-z0-9]+)?\]"
             )
         if pattern.search(text):
             new_text, n = pattern.subn(f"![{key}]({real_path})", text)  # count=0: replace all
             text = new_text
             reemplazado[key] = real_path
+            replaced_instances += n
     remaining = scan_recording_placeholders(text)
     for p in remaining:
         if p["kind"] == "ai_annotate":
@@ -1188,22 +1266,32 @@ def apply_recording_mapping(text: str, mapping: dict) -> tuple[str, dict, list]:
                 missing.append({
                     "name": p["name"],
                     "kind": "ai_annotate",
-                    "reason": f"AI ANNOTATE requires mapping key 'ai-annotated-{p['name']}', not plain '{p['name']}'. Plain key replaces [SCREENSHOT:] only.",
+                    "status": "wrong_mapping_type",
+                    "reason": (f"AI ANNOTATE requires mapping key "
+                               f"'ai-annotated-{p['name']}', not plain "
+                               f"'{p['name']}'. Plain key replaces "
+                               f"[SCREENSHOT:] only."),
                 })
             else:
                 missing.append({
                     "name": p["name"],
                     "kind": "ai_annotate",
-                    "reason": f"No mapping entry for this AI ANNOTATE. Add 'ai-annotated-{p['name']}' to mapping.",
+                    "status": "no_mapping",
+                    "reason": (f"No mapping entry for this AI ANNOTATE. "
+                               f"Add 'ai-annotated-{p['name']}' to mapping."),
                 })
         else:
             if p["name"] not in mapping:
+                # G fix: distinguish no_mapping from user_declared_needed
+                status = "user_declared_needed" if p["needed"] else "no_mapping"
                 missing.append({
                     "name": p["name"],
                     "kind": p["kind"],
-                    "reason": f"No mapping entry for this {p['kind']} placeholder.",
+                    "status": status,
+                    "reason": (f"No mapping entry for this "
+                               f"{p['kind']} placeholder."),
                 })
-    return text, reemplazado, missing
+    return text, reemplazado, missing, replaced_instances
 def main(argv: list[str]) -> int:
     if len(argv) < 2 or argv[1] in ("--help", "-h", "help"):
         print(__doc__)

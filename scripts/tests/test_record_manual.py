@@ -97,8 +97,11 @@ class RecordManualTests(unittest.TestCase):
                 }))
                 r = run(["record-manual", md, "--apply-mapping", mapping_path])
                 self.assertEqual(r.returncode, 0, msg=r.stderr)
-                self.assertIn("replaced: 2 placeholders", r.stdout)  # 2 unique mapping keys
+                # I14: report now distinguishes unique mappings from instance count
+                self.assertIn("replaced: 2 unique mappings (2 placeholder instances)", r.stdout)
                 self.assertIn("placeholders still missing: 1", r.stdout)
+                # G: missing list now carries status ("no_mapping" for plain [...: x])
+                self.assertIn("(no_mapping)", r.stdout)
                 # Read the updated manual
                 new_text = Path(md).read_text()
                 self.assertIn("![01-list](screenshots/01-list.png)", new_text)
@@ -224,7 +227,8 @@ class RecordManualTests(unittest.TestCase):
                 }))
                 r = run(["record-manual", md, "--apply-mapping", mapping_path])
                 self.assertEqual(r.returncode, 0, msg=r.stderr)
-                self.assertIn("replaced: 2 placeholders", r.stdout)  # 2 unique mapping keys
+                # I14: 2 unique mapping keys, 2 instance replacements
+                self.assertIn("replaced: 2 unique mappings (2 placeholder instances)", r.stdout)
                 new_text = Path(md).read_text()
                 self.assertIn("![01-list](screenshots/01-list.png)", new_text)
                 self.assertIn("![ai-annotated-01-list](screenshots/01-list.ai-annotated.png)", new_text)
@@ -257,7 +261,8 @@ class RecordManualTests(unittest.TestCase):
                 }))
                 r = run(["record-manual", md, "--apply-mapping", mapping_path])
                 self.assertEqual(r.returncode, 0, msg=r.stderr)
-                self.assertIn("replaced: 1 placeholders", r.stdout)  # 1 unique mapping key
+                # I14: 1 unique key, but 2 placeholder instances were replaced
+                self.assertIn("replaced: 1 unique mappings (2 placeholder instances)", r.stdout)
                 new_text = Path(md).read_text()
                 # Both occurrences must be replaced (not just the first)
                 self.assertNotIn("[SCREENSHOT: 01-list.png]", new_text)
@@ -290,10 +295,13 @@ class RecordManualTests(unittest.TestCase):
                 }))
                 r = run(["record-manual", md, "--apply-mapping", mapping_path])
                 self.assertEqual(r.returncode, 0, msg=r.stderr)
-                # The SCREENSHOT was replaced
-                self.assertIn("replaced: 1 placeholders", r.stdout)
+                # I14: 1 unique key, 1 instance replaced
+                self.assertIn("replaced: 1 unique mappings (1 placeholder instances)", r.stdout)
                 # The AI ANNOTATE is in missing (not silently dropped)
                 self.assertIn("placeholders still missing: 1", r.stdout)
+                # G: missing entries now have a `status` field. AI ANNOTATE
+                # with plain-name mapping → status="wrong_mapping_type"
+                self.assertIn("(wrong_mapping_type)", r.stdout)
                 # Explicit reason: AI ANNOTATE requires ai-annotated- prefix
                 self.assertIn("ai-annotated-01-list", r.stdout)
                 # The AI ANNOTATE marker is still in the manual
@@ -337,10 +345,179 @@ class RecordManualTests(unittest.TestCase):
                     "ai-annotated-happy": "screenshots/happy.ai-annotated.png",
                 }))
                 r = run(["record-manual", md, "--apply-mapping", mapping_path])
-                self.assertIn("replaced: 1 placeholders", r.stdout)
+                self.assertEqual(r.returncode, 0, msg=r.stderr)
+                # I14: 1 unique key, 1 instance replaced
+                self.assertIn("replaced: 1 unique mappings (1 placeholder instances)", r.stdout)
                 self.assertNotIn("placeholders still missing", r.stdout)
                 new_text = Path(md).read_text()
                 self.assertIn("![ai-annotated-happy](screenshots/happy.ai-annotated.png)", new_text)
+            finally:
+                if os.path.exists(mapping_path):
+                    os.unlink(mapping_path)
+        finally:
+            os.unlink(md)
+
+    # === v0.2.4 audit re-review: C / I11 / G / F9 tests ===
+
+    def test_recorder_template_uses_dollar_prefix_for_auth_env(self):
+        """C: auth_env entries must be '$AUTH_USER' (env var ref), not bare.
+        Bare entries get passed to the login form as the literal string."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write("[SCREENSHOT: 01-list.png]\n")
+            md = f.name
+        try:
+            template_path = md + ".template.json"
+            try:
+                run(["record-manual", md, "--generate-template", template_path])
+                data = json.loads(Path(template_path).read_text())
+                for entry in data["auth_env"]:
+                    self.assertTrue(
+                        entry.startswith("$"),
+                        f"auth_env entry {entry!r} missing $ prefix (would be "
+                        f"submitted to login form as the literal env var name)",
+                    )
+            finally:
+                if os.path.exists(template_path):
+                    os.unlink(template_path)
+        finally:
+            os.unlink(md)
+
+    def test_scan_supports_multi_segment_placeholder_names(self):
+        """I11: placeholder names with multiple dot-segments (e.g. v1.2-heatmap)
+        must be recognized. The trailing extension (.png / .mp4) is stripped."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write(textwrap.dedent("""\
+                # Manual
+                [SCREENSHOT: v1.2-heatmap.png]
+                [VIDEO: settings.modal.flow.mp4]
+                [SCREENSHOT: simple.png]
+            """))
+            md = f.name
+        try:
+            r = run(["record-manual", md])
+            self.assertEqual(r.returncode, 0, msg=r.stderr)
+            self.assertIn("RECORDING_NEEDED", r.stdout)
+            self.assertIn("screenshots: 2", r.stdout)
+            self.assertIn("v1.2-heatmap", r.stdout)
+            self.assertIn("settings.modal.flow", r.stdout)
+            self.assertIn("simple", r.stdout)
+        finally:
+            os.unlink(md)
+
+    def test_apply_mapping_handles_multi_segment_placeholder_name(self):
+        """I11: end-to-end — multi-segment placeholder gets matched and
+        replaced. The mapping key is the bare name (extension stripped)."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write("[SCREENSHOT: v1.2-heatmap.png]\n[VIDEO: settings.modal.flow.mp4]\n")
+            md = f.name
+        try:
+            mapping_path = md + ".mapping.json"
+            try:
+                Path(mapping_path).write_text(json.dumps({
+                    "v1.2-heatmap": "screenshots/v1.2-heatmap.png",
+                    "settings.modal.flow": "videos/settings.modal.flow.mp4",
+                }))
+                r = run(["record-manual", md, "--apply-mapping", mapping_path])
+                self.assertEqual(r.returncode, 0, msg=r.stderr)
+                self.assertIn("replaced: 2 unique mappings (2 placeholder instances)", r.stdout)
+                new_text = Path(md).read_text()
+                self.assertIn("![v1.2-heatmap](screenshots/v1.2-heatmap.png)", new_text)
+                self.assertIn("![settings.modal.flow](videos/settings.modal.flow.mp4)", new_text)
+            finally:
+                if os.path.exists(mapping_path):
+                    os.unlink(mapping_path)
+        finally:
+            os.unlink(md)
+
+    def test_missing_list_reports_user_declared_needed_status(self):
+        """G: placeholders written with the [... NEEDED: x] form get a
+        different status from plain [...: x]. The agent loop uses this
+        to prioritize user-explicit needs."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write(textwrap.dedent("""\
+                # Manual
+                [SCREENSHOT: 01-list.png]
+                [SCREENSHOT NEEDED: 02-form.png]
+                [VIDEO NEEDED: demo.mp4]
+            """))
+            md = f.name
+        try:
+            mapping_path = md + ".mapping.json"
+            try:
+                # Map only the plain one
+                Path(mapping_path).write_text(json.dumps({
+                    "01-list": "screenshots/01-list.png",
+                }))
+                r = run(["record-manual", md, "--apply-mapping", mapping_path])
+                self.assertEqual(r.returncode, 0, msg=r.stderr)
+                # The plain one got replaced; the two NEEDED ones are missing
+                self.assertIn("placeholders still missing: 2", r.stdout)
+                # The NEEDED placeholders get user_declared_needed status
+                self.assertIn("(user_declared_needed)", r.stdout)
+                # The plain placeholder is replaced (no missing for it)
+                self.assertNotIn("[SCREENSHOT: 01-list.png]", r.stdout.split("placeholders still missing")[0] or "")
+            finally:
+                if os.path.exists(mapping_path):
+                    os.unlink(mapping_path)
+        finally:
+            os.unlink(md)
+
+    def test_apply_mapping_writes_atomically_via_tmp_rename(self):
+        """F9: a crash mid-write used to truncate the manual to a
+        half-applied state. Now --apply-mapping writes to a .tmp file
+        in the same dir and atomically renames (POSIX-atomic).
+        """
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write("# Manual\n[SCREENSHOT: 01-list.png]\n")
+            md = f.name
+        try:
+            mapping_path = md + ".mapping.json"
+            try:
+                Path(mapping_path).write_text(json.dumps({
+                    "01-list": "screenshots/01-list.png",
+                }))
+                # Pre-condition: no .tmp file exists
+                tmp_path = Path(md + ".tmp")
+                self.assertFalse(tmp_path.exists())
+                r = run(["record-manual", md, "--apply-mapping", mapping_path])
+                self.assertEqual(r.returncode, 0, msg=r.stderr)
+                # Post-condition: .tmp file was cleaned up by the rename
+                self.assertFalse(tmp_path.exists(),
+                                 f"stray .tmp file left behind: {tmp_path}")
+                # And the manual was actually updated
+                new_text = Path(md).read_text()
+                self.assertIn("![01-list](screenshots/01-list.png)", new_text)
+            finally:
+                if os.path.exists(mapping_path):
+                    os.unlink(mapping_path)
+        finally:
+            os.unlink(md)
+
+    def test_report_distinguishes_unique_mappings_from_instance_count(self):
+        """I14: a single mapping key that replaces 2 same-name placeholders
+        is reported as '1 unique mappings (2 placeholder instances)' —
+        not just '1 placeholders' (which was misleading)."""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write(textwrap.dedent("""\
+                # Manual
+                ## Task 1
+                [SCREENSHOT: hero.png]
+                ## Task 2
+                [SCREENSHOT: hero.png]
+                ## Task 3
+                [SCREENSHOT: hero.png]
+            """))
+            md = f.name
+        try:
+            mapping_path = md + ".mapping.json"
+            try:
+                Path(mapping_path).write_text(json.dumps({
+                    "hero": "screenshots/hero.png",
+                }))
+                r = run(["record-manual", md, "--apply-mapping", mapping_path])
+                self.assertEqual(r.returncode, 0, msg=r.stderr)
+                # 1 unique mapping, 3 placeholder instances
+                self.assertIn("replaced: 1 unique mappings (3 placeholder instances)", r.stdout)
             finally:
                 if os.path.exists(mapping_path):
                     os.unlink(mapping_path)

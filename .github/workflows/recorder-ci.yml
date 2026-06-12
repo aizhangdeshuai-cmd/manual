@@ -47,3 +47,22 @@ jobs:
           "
       - name: Verify ffmpeg
         run: ffmpeg -version | head -1
+      # F5 fix (v0.2.4 audit): the previous CI only did a Playwright
+      # hello-world — it never actually ran the recorder test suite.
+      # Add a unit-only pytest run that does NOT need a browser
+      # (so this is fast and reliable). Browser-dependent tests
+      # run on local dev only; the CI gate is "do unit tests pass
+      # in a clean environment?".
+      - name: Run recorder unit tests (no browser required)
+        working-directory: recorder
+        run: |
+          python -m pytest tests/unit/ -v --tb=short
+      # F5.2: also exercise the CLI entry points so a broken
+      # command surface (typo in subcommand, missing help text)
+      # gets caught before the next push.
+      - name: Smoke-test the CLI subcommands
+        working-directory: recorder
+        run: |
+          python -m recorder_plugin.cli --version
+          python -m recorder_plugin.cli --help
+          python -m recorder_plugin.cli apply-ai-responses /tmp/rec-ci-smoke-no-such-dir || true

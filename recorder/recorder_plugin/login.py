@@ -9,7 +9,13 @@ from dataclasses import dataclass
 
 TOTP_PERIOD = 30
 TOTP_DIGITS = 6
-TOTP_WINDOW_DRIFT = 1  # accept current ±1 window by default
+# v0.2.4 audit: drift 1 → 2. Network/agent-loop latency plus the time
+# the auth page takes to render the TOTP input and accept paste can
+# easily push a 30-second window past its boundary. drift=2 gives
+# 90s of slack (prev, current, next, next+1 — i.e. 4 candidates in
+# totp_codes_with_drift), which is the standard recommended setting
+# for headless automation against real TOTP-protected services.
+TOTP_WINDOW_DRIFT = 2
 
 
 def validate_totp_secret(secret: str) -> bool:
@@ -43,10 +49,15 @@ def totp_code(secret: str, timestamp: float | None = None) -> str:
 
 
 def totp_codes_with_drift(secret: str, drift: int = TOTP_WINDOW_DRIFT, timestamp: float | None = None) -> list[str]:
-    """Return [prev, current, next] TOTP codes to handle window drift."""
+    """Return 2*drift+1 TOTP codes centered on the current window.
+
+    With the default drift=2 this returns 5 codes (counter-2 ... counter+2).
+    The caller (perform_login) uses the middle one; the rest are kept for
+    manual debugging and for future retry paths.
+    """
     ts = timestamp if timestamp is not None else time.time()
     counter = int(ts) // TOTP_PERIOD
-    return [_hotp(secret, counter + d) for d in (-drift, 0, drift)]
+    return [_hotp(secret, counter + d) for d in range(-drift, drift + 1)]
 
 
 def resolve_credential(value: str, env: dict | None = None) -> str:
@@ -88,6 +99,11 @@ async def perform_login(recorder, step: LoginStep, env: dict | None = None) -> b
     """Navigate, fill the form, optionally compute TOTP, submit, verify success.
 
     Returns True if login succeeded.
+
+    TOTP handling: computes 2*drift+1 codes (default 5 with drift=2) and
+    submits the center one. If the server rejects it as expired, callers
+    can re-invoke perform_login (the recorder loop does not retry by
+    design — the agent loop decides retry policy).
     """
     user = resolve_credential(step.user, env)
     pw = resolve_credential(step.pass_, env)
@@ -97,7 +113,7 @@ async def perform_login(recorder, step: LoginStep, env: dict | None = None) -> b
     if step.totp_secret:
         secret = resolve_credential(step.totp_secret, env)
         codes = totp_codes_with_drift(secret, drift=step.totp_drift_seconds)
-        await recorder.page.fill("input[name='totp']", codes[1])
+        await recorder.page.fill("input[name='totp']", codes[step.totp_drift_seconds])
     await recorder.page.click(step.submit_selector)
     try:
         await recorder.page.wait_for_load_state("networkidle", timeout=5000)

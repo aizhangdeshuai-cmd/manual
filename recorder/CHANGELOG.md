@@ -28,10 +28,105 @@ now a deterministic data plane with zero LLM knowledge.
 
 **New CLI subcommand**:
 - `apply-ai-responses <output-dir>` — reads pending
-  `_ai_annotation_response_*.json` files written by the agent, applies
+  `.ai_annotation_response_*.json` files written by the agent, applies
   Pillow annotations, deletes the matching request files. Exits 1 if
   any requests are skipped (so the agent notices failures; was: 0 due
   to the `all([]) == True` Python gotcha).
+
+**Apply response status codes** (v0.2.4 audit refinement):
+The `apply_response` function now returns one of `applied`,
+`skipped_missing_image`, `skipped_missing_response`,
+`skipped_invalid_response`, `skipped_unsupported_schema`, or
+`skipped_image_unreadable`. The CLI aggregates these and exits 1 if
+any skip status is present (was: only `skipped` was checked).
+
+### Audit re-review — 3-party review (F / I / B / C / G / N items)
+
+After the v0.2.4 release, a 3-party review (hostile code-reviewer +
+end-to-end operator-reviewer + recorder owner) iterated on the
+implementation and surfaced 15 must-fix items. All 15 are addressed
+in this revision.
+
+**vision.py**:
+- **F3** (audit): the `prompt` field in the request file is now
+  self-contained — it PREPENDS `REQUEST_FILE_PROMPT_HINT` to the
+  user task. Agents that read only the `prompt` field (and ignore
+  the separate `prompt_hint` field) used to produce wildly wrong
+  coordinate bases. The `prompt_hint` field is removed.
+- **F7** (audit): the `image_exists` field was dead (written but
+  never read). Removed from the request schema.
+- **F8** (audit): `get_image_size` now catches `UnidentifiedImageError`
+  and `OSError` and re-raises as a clear `ValueError` (corrupt or
+  unreadable image). `apply_response` catches this and returns
+  `skipped_image_unreadable` so the agent knows the source image
+  is broken, not the response.
+- **F10** (audit): `schema_version` is now actually checked. A
+  request with a missing or unsupported schema version is refused
+  with `skipped_unsupported_schema` instead of being silently
+  applied.
+- **I9** (audit): `apply_response` now reports
+  `skipped_invalid_count` alongside `annotations_count` — when the
+  response JSON has N boxes of which M fail schema validation, M
+  is reported (not silently dropped).
+- **I12** (audit): "response missing" and "response invalid" are
+  now distinct status codes (`skipped_missing_response` vs
+  `skipped_invalid_response`) so the agent loop can take different
+  action.
+
+**login.py**:
+- **B** (audit): `TOTP_WINDOW_DRIFT` raised 1 → 2. Network latency
+  plus the time the auth page takes to render the TOTP input and
+  accept paste routinely pushes a 30-second window past its
+  boundary in headless automation against real services. drift=2
+  gives 90s of slack (5 candidate codes — prev2/prev/current/next/
+  next2). `perform_login` now picks the center code (was: index 1
+  of 3, which only worked with drift=1).
+
+**scripts/manual_helper.py**:
+- **C** (audit): the recorder script template now generates
+  `auth_env: ["$AUTH_USER", "$AUTH_PASS", "$AUTH_TOTP_SECRET"]`
+  with the `$` prefix. Without it, `resolve_credential()` returns
+  the literal string "AUTH_USER" and the login form gets submitted
+  with the env var NAME as the username.
+- **I11** (audit): placeholder name regex now supports multi-segment
+  names like `v1.2-heatmap` or `settings.modal`. The extension
+  (`.png` / `.mp4` / `.jpg` / `.webm` / `.gif` / `.mov`) is
+  recognized and stripped in scan, so mapping keys stay bare.
+- **G** (audit): the missing-list schema now distinguishes
+  `no_mapping` (placeholder exists, no entry in mapping) from
+  `user_declared_needed` (user wrote `[... NEEDED: x]`, explicitly
+  flagging that this MUST be replaced) and `wrong_mapping_type`
+  (AI ANNOTATE placeholder was given a plain name key instead of
+  `ai-annotated-` prefixed). The agent loop can now prioritize
+  user-declared needs.
+- **I14** (audit): the `--apply-mapping` report now reports BOTH
+  the number of unique mapping keys and the number of placeholder
+  INSTANCES replaced. Previously the report said "replaced: 1
+  placeholders" for a case where 2 same-name placeholders were
+  actually replaced — a single mapping key replacing 2+ instances
+  was invisible to the user.
+- **F9** (audit): `--apply-mapping` now writes via tmp + rename
+  (POSIX-atomic). A crash mid-write used to truncate the manual
+  to a half-applied state; now the manual is either fully
+  updated or fully intact.
+
+**recorder/SKILL.md**:
+- **I7** (audit): "The 12 step actions" → "The 10 step actions".
+  The actual `ALLOWED_STEP_ACTIONS` set has 10 entries.
+
+**.github/workflows/recorder-ci.yml**:
+- **F5** (audit): the workflow now actually runs the recorder
+  test suite (`pytest tests/unit/ -v`) and smoke-tests the CLI
+  (`--version`, `--help`, `apply-ai-responses` on a missing dir).
+  Previously the CI only verified a hello-world Playwright launch
+  — a broken test or a typo in the CLI help text would not be
+  caught. Browser-dependent tests are intentionally excluded from
+  CI (still run on local dev only).
+
+Test count: 80 → 88 → 93 → 107 (this revision: +10 vision status
+refinement tests covering F3/F7/F8/F10/I9/I12, +4 login TOTP-drift
+tests covering B, +6 manual_helper audit re-review tests covering
+C/I11/G/F9/I14 — totals +14 audit re-review tests on top of 93).
 
 **New script output field**:
 - `pending_ai_annotations: [{step_name, request_file, image_path,
@@ -48,9 +143,10 @@ now a deterministic data plane with zero LLM knowledge.
 **Total recorder deps**: `playwright`, `Pillow`, `mcp` (3 packages,
 down from 4). Stdlib only otherwise.
 
-Test count: 80 → 88 (v0.2.2: +2 video regression; v0.2.4: +19 vision
-protocol; -13 from removing old SDK-mock vision tests that no longer
-apply).
+Test count: 80 → 88 → 93 (v0.2.2: +2 video regression; v0.2.4: +19 vision
+protocol + audit re-review tests, -13 from removing old SDK-mock vision
+tests that no longer apply; v0.2.4 audit: +5 status/refinement tests
+on top of 88).
 
 ## 0.2.1 (2026-06-12)
 

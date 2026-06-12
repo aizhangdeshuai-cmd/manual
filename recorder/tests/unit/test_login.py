@@ -1,5 +1,7 @@
 import pytest
-from recorder_plugin.login import totp_code, validate_totp_secret
+from recorder_plugin.login import (
+    totp_code, validate_totp_secret, TOTP_WINDOW_DRIFT,
+)
 
 
 def test_validate_totp_secret_accepts_base32():
@@ -81,4 +83,45 @@ def test_login_step_from_dict_with_totp():
         "totp_drift_seconds": 2,
     })
     assert step.totp_secret == "$S"
+    assert step.totp_drift_seconds == 2
+
+
+# === v0.2.4 audit re-review: B (TOTP drift default) ===
+
+def test_totp_window_drift_default_is_2():
+    """B: drift=1 was too tight for real-world latency. drift=2 gives 90s
+    of slack (5 candidate codes). This is the standard recommended
+    setting for headless automation against real TOTP services."""
+    assert TOTP_WINDOW_DRIFT == 2
+
+
+def test_totp_codes_with_drift_default_returns_five_codes():
+    """B: with the new default drift=2, the helper returns 5 codes
+    (counter-2 through counter+2). perform_login picks the center one."""
+    from recorder_plugin.login import totp_codes_with_drift
+    codes = totp_codes_with_drift("JBSWY3DPEHPK3PXP", timestamp=1234567890)
+    assert len(codes) == 5
+
+
+def test_totp_codes_with_drift_returns_correct_index_for_center():
+    """B: with drift=2, the center code is at index 2 (was: index 1 with drift=1).
+    perform_login relies on this; an off-by-one would submit a stale or future code."""
+    from recorder_plugin.login import totp_codes_with_drift
+    codes = totp_codes_with_drift("JBSWY3DPEHPK3PXP", drift=2, timestamp=1234567890)
+    expected_center = totp_code("JBSWY3DPEHPK3PXP", timestamp=1234567890)
+    assert codes[2] == expected_center
+
+
+def test_login_step_default_drift_is_2():
+    """B: a LoginStep without explicit totp_drift_seconds must inherit the
+    new default (drift=2). Operators who don't override it should get
+    the safer, more lenient behavior."""
+    from recorder_plugin.login import LoginStep, TOTP_WINDOW_DRIFT
+    step = LoginStep.from_dict({
+        "url": "https://x", "user_field": "u", "user": "$U",
+        "pass_field": "p", "pass": "$P", "submit_selector": "s",
+        "totp_secret": "$S",
+        # no totp_drift_seconds → inherits TOTP_WINDOW_DRIFT
+    })
+    assert step.totp_drift_seconds == TOTP_WINDOW_DRIFT
     assert step.totp_drift_seconds == 2
