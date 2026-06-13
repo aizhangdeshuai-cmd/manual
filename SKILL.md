@@ -351,6 +351,28 @@ A: 失败的行会在导入结果里标红,鼠标悬停看错误原因。常见�
 
 ## 4. 任务卡硬模板(7 字段 + "操作前必看")
 
+> **v0.3.2: 写完每张任务卡前**——LLM 写 manual 前先**自己**跑一遍 `validate-output.py <your.md>` 自检。下面是 7 项检查**精确**的 regex / 关键字，写卡时**目标**就是触发这些：
+>
+> | # | 检查名 | 触发条件（LLM 自检时数一下）| 阈值 |
+> |---|---|---|---|
+> | 1 | `7-field hits` | 含 `适用角色` / `前置条件` / `操作前必看` / `### 步骤` / `### 成功后看到` / `### 字段说明` / `### 如果你卡住了` / `### 相关任务` 的数量 | ≥ 6 |
+> | 2 | `操作前必看 blocks` | 含 `操作前必看` 字样的次数（**不含** fenced code 块内）| ≥ 3 |
+> | 3 | `visual anchors` | 含 4 个 emoji 锚点（⚠️ / 💡 / ❌ / 📌）的总次数 | ≥ 3 |
+> | 4 | `appendix-A 6-col table` | 含 6 列 markdown 表格（`| --- | --- | ... |` 共 6 个 `---` 单元格）| ≥ 1 |
+> | 5 | `role-permission matrix` | 含 `## 角色与权限速查` / `角色权限速查` / `角色与权限` / `Role Quick Reference` 等（同义）| ≥ 1 |
+> | 6 | `screenshot count` | 含 `![alt](path.png)` / `![alt](path.jpg)` 链接次数 | ≥ 2 |
+> | 7 | `screenshot files exist` | **每条** `![alt](path.png)` 对应文件 ≥ 50×50 px（**不**是 1×1 占位）+ 文本里没有未替换的 `[SCREENSHOT: x]` / `[VIDEO: x]` 占位 | 全部 |
+>
+> **LLM 写作 checklist**（写完一张卡就 grep 一遍）：
+> - [ ] 这张卡 7 字段全（适用角色 / 前置条件 / 操作前必看 / 步骤 / 成功后看到 / 字段说明 / 如果你卡住了 / 相关任务）
+> - [ ] 有 ≥ 1 个 `操作前必看` 块（不在代码块里）
+> - [ ] 至少 1 个视觉锚点 emoji（⚠️ / 💡 / ❌ / 📌）
+> - [ ] 引用的图都是**真实文件**（≥ 50×50 PNG），不是 1×1 灰
+> - [ ] 没有任何未替换的 `[SCREENSHOT: xxx.png]` / `[VIDEO: xxx.mp4]` 占位
+> - [ ] 跑了 `python3 -m manual_helper fill-citation-shas <this.md>` 把 `(auto)` 替换成真 SHA
+>
+> 跑完：`python3 scripts/validate-output.py docs/user-manual/manual/<name>.md --strict` — 必须 exit 0。
+
 ```markdown
 ### <动词开头任务名,如"创建新员工账号">
 

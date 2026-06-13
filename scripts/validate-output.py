@@ -71,37 +71,126 @@ def _extract_image_paths(text: str) -> list[str]:
     return out
 
 
+# v0.3.2: pattern for unreplaced `[SCREENSHOT: x]` / `[VIDEO: x]`
+# placeholders (not yet replaced with `![alt](path)` markdown image).
+# Same shape as manual_helper._PLACEHOLDER_RE but only for the two
+# kinds that map to asset files (not [AI ANNOTATE: x], which is a
+# §15 vision-annotation marker, not a missing asset).
+_UNREPLACED_PLACEHOLDER_RE = re.compile(
+    r"\[(?P<kind>SCREENSHOT|VIDEO)(?:\s+NEEDED)?\s*:\s*"
+    r"(?P<name>[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)*)"
+    r"(?:\.(?P<ext>png|mp4|jpg|jpeg|webm))?\]"
+)
+
+
+def _extract_unreplaced_placeholders(text: str) -> list[dict]:
+    """v0.3.2: find `[SCREENSHOT: x]` / `[VIDEO: x]` placeholders that
+    are still in the manual text (not replaced with `![alt](path)`
+    markdown image). Each one represents a missing asset — the agent
+    should have either recorded a real screenshot/video OR replaced
+    the placeholder with a `![alt](path)` link.
+
+    Skips occurrences inside fenced code blocks (so doc examples
+    showing the placeholder syntax don't count).
+    """
+    out: list[dict] = []
+    in_code = False
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code:
+            continue
+        for m in _UNREPLACED_PLACEHOLDER_RE.finditer(line):
+            kind = m.group("kind").lower()
+            name = m.group("name")
+            ext = m.group("ext") or ""
+            full = f"{name}.{ext}" if ext else name
+            out.append({"kind": kind, "name": full, "raw": m.group(0)})
+    return out
+
+
+def _is_placeholder_png(path: Path) -> bool:
+    """v0.3.2: a PNG file is a 'placeholder' if its dimensions are < 50x50.
+    Real screenshots are 1280x800+; 1×1 or 32×32 etc. means the LLM
+    agent generated an empty stub to "satisfy" the file-existence
+    check (or copy-pasted from a test fixture). Either way, it's not
+    a real asset and should be reported as missing.
+
+    Returns False for non-PNG files (videos, JPEGs aren't gated by
+    size — the recorder could legitimately produce a 100×100 video
+    thumbnail that we don't want to false-positive on).
+    """
+    if path.suffix.lower() != ".png":
+        return False
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            w, h = img.size
+        return w < 50 or h < 50
+    except Exception:
+        # Unreadable image — don't false-positive. Other checks
+        # (validate-output's "screenshot files exist") already cover
+        # the existence case; the user will see the file as present
+        # and can investigate manually.
+        return False
+
+
 def _check_screenshot_files_exist(md_path: Path, text: str) -> dict:
     """For each `![alt](path)` image link in `text`, verify the file exists
-    on disk relative to the markdown file's directory.
+    on disk relative to the markdown file's directory, AND has real
+    dimensions (≥ 50×50 px). Also count any `[SCREENSHOT: x]` /
+    `[VIDEO: x]` placeholders still in the text — those count as
+    missing assets too.
 
-    Returns the standard check-shaped dict plus extra fields:
-      - present: how many referenced files exist
-      - missing_count: present - total
-      - missing_paths: first 5 missing paths (for human output)
+    v0.3.1 → v0.3.2 evolutions:
+      - 1×1 / 32×32 placeholder PNGs (LLM-generated stubs) used
+        to pass; now reported as placeholder_png.
+      - `[SCREENSHOT: x]` text placeholders used to be invisible
+        to this check; now counted as unreplaced_placeholder.
+
+    Returns the standard check-shaped dict plus:
+      - present: image links with a real-sized file
+      - placeholder_png_count: image links whose file exists but is < 50×50
+      - unreplaced_placeholder_count: `[SCREENSHOT:]/[VIDEO:]` text in manual
+      - missing_count: present - (total of all 3 categories)
+      - missing_paths: first 5 issues (mix of file-missing and placeholder)
     """
-    paths = _extract_image_paths(text)
+    image_paths = _extract_image_paths(text)
+    placeholders = _extract_unreplaced_placeholders(text)
     md_dir = md_path.parent
     present = 0
-    missing: list[str] = []
-    for ref in paths:
+    placeholder_png_count = 0
+    missing_paths: list[str] = []
+    for ref in image_paths:
         target = (md_dir / ref).resolve()
-        if target.exists():
-            present += 1
+        if not target.exists():
+            missing_paths.append(ref)
+        elif _is_placeholder_png(target):
+            placeholder_png_count += 1
+            missing_paths.append(f"{ref} (1×1 placeholder PNG)")
         else:
-            missing.append(ref)
-    total = len(paths)
+            present += 1
+    # Add unreplaced placeholders to the missing list
+    for ph in placeholders:
+        missing_paths.append(f"[{ph['kind'].upper()}: {ph['name']}]")
+    total = len(image_paths) + len(placeholders)
+    missing_count = total - present
     return {
         "name": "screenshot files exist",
         "hits": present,
         "threshold": total,
         "comparison": "ge",
-        # If there are no image refs at all, we don't fail (the OTHER
-        # checks already catch "0 screenshots mentioned").
-        "ok": (present == total) if total > 0 else True,
+        # ok only when ALL categories pass: present == total AND no
+        # placeholder PNGs AND no unreplaced placeholders. Since
+        # present == total - missing_count, this simplifies to
+        # missing_count == 0 AND placeholder_png_count == 0.
+        "ok": (missing_count == 0 and placeholder_png_count == 0),
         "present": present,
-        "missing_count": total - present,
-        "missing_paths": missing[:5],
+        "missing_count": missing_count,
+        "missing_paths": missing_paths[:5],
+        "placeholder_png_count": placeholder_png_count,
+        "unreplaced_placeholder_count": len(placeholders),
     }
 
 
@@ -198,6 +287,8 @@ def validate_file(path):
         "present": file_check["present"],
         "missing_count": file_check["missing_count"],
         "missing_paths": file_check["missing_paths"],
+        "placeholder_png_count": file_check["placeholder_png_count"],
+        "unreplaced_placeholder_count": file_check["unreplaced_placeholder_count"],
     })
     all_ok = all_ok and file_check["ok"]
     return {"file": str(path), "ok": all_ok, "checks": results}
@@ -210,10 +301,22 @@ def render_human(results):
         parts = []
         for c in r["checks"]:
             if c["name"] == "screenshot files exist":
-                # Custom rendering: present/total with missing-count suffix
+                # v0.3.2: surface the 3 sub-categories so the user
+                # sees WHY the check failed (file missing vs 1x1
+                # placeholder PNG vs unreplaced [SCREENSHOT: x]).
+                breakdown = []
+                if c.get("missing_count", 0) > 0:
+                    breakdown.append(f"{c['missing_count']} missing")
+                if c.get("placeholder_png_count", 0) > 0:
+                    breakdown.append(f"{c['placeholder_png_count']} 1×1 placeholder PNGs")
+                if c.get("unreplaced_placeholder_count", 0) > 0:
+                    breakdown.append(
+                        f"{c['unreplaced_placeholder_count']} unreplaced [SCREENSHOT:]/[VIDEO:]"
+                    )
+                breakdown_str = ", ".join(breakdown) if breakdown else "0 issues"
                 parts.append(
-                    "{}={}/{} ({} missing)".format(
-                        c["name"], c["hits"], c["threshold"], c["missing_count"]
+                    "{}={}/{} ({})".format(
+                        c["name"], c["hits"], c["threshold"], breakdown_str
                     )
                 )
             else:
@@ -224,10 +327,12 @@ def render_human(results):
             if not c["ok"]:
                 if c["name"] == "screenshot files exist":
                     lines.append(
-                        "        - {}: {}/{} ({} missing: {})".format(
+                        "        - {}: {}/{} ({} missing, {} placeholder PNGs, {} unreplaced; e.g. {})".format(
                             c["name"], c["hits"], c["threshold"],
-                            c["missing_count"],
-                            ", ".join(c["missing_paths"]),
+                            c.get("missing_count", 0),
+                            c.get("placeholder_png_count", 0),
+                            c.get("unreplaced_placeholder_count", 0),
+                            ", ".join(c.get("missing_paths", [])) or "(no examples)",
                         )
                     )
                 else:

@@ -369,6 +369,142 @@ class ValidateOutputTests(unittest.TestCase):
             self.assertEqual(check["threshold"], 0)
             self.assertTrue(check["ok"])
 
+    # === v0.3.2: PNG dimension check + unreplaced placeholder check ===
+
+    def test_png_smaller_than_50x50_is_placeholder(self):
+        """v0.3.2: a PNG file that exists but is < 50×50 px is treated
+        as a placeholder (LLM-generated stub) and reported separately
+        from missing files. The check stays ok=False even though the
+        file is on disk — a 1×1 gray PNG is not a real asset."""
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as d:
+            img_dir = Path(d) / "img"
+            img_dir.mkdir()
+            # 32x32 stub
+            stub = Image.new("RGB", (32, 32), "gray")
+            stub.save(img_dir / "tiny.png")
+            # 1280x800 real
+            real = Image.new("RGB", (1280, 800), "white")
+            real.save(img_dir / "real.png")
+            f = Path(d) / "manual.md"
+            f.write_text(textwrap.dedent("""\
+                # Manual
+                ![tiny](img/tiny.png)
+                ![real](img/real.png)
+            """))
+            r = run(["--json", str(f)])
+            data = json.loads(r.stdout)
+            check = next(c for c in data[0]["checks"] if c["name"] == "screenshot files exist")
+            self.assertEqual(check["present"], 1, msg=f"only the real one should count as present: {check}")
+            self.assertEqual(check["placeholder_png_count"], 1)
+            self.assertEqual(check["missing_count"], 1)
+            self.assertFalse(check["ok"])
+
+    def test_png_50x50_boundary_is_real(self):
+        """v0.3.2: a 50×50 PNG is the boundary — at exactly 50, count
+        as real (≥ 50x50). At 49, count as placeholder."""
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as d:
+            img_dir = Path(d) / "img"
+            img_dir.mkdir()
+            Image.new("RGB", (50, 50), "white").save(img_dir / "fifty.png")
+            Image.new("RGB", (49, 50), "white").save(img_dir / "fortynine.png")
+            f = Path(d) / "manual.md"
+            f.write_text("![50](img/fifty.png)\n![49](img/fortynine.png)\n")
+            r = run(["--json", str(f)])
+            data = json.loads(r.stdout)
+            check = next(c for c in data[0]["checks"] if c["name"] == "screenshot files exist")
+            self.assertEqual(check["present"], 1)
+            self.assertEqual(check["placeholder_png_count"], 1)
+
+    def test_unreplaced_scrennshot_placeholder_counts_as_missing(self):
+        """v0.3.2: `[SCREENSHOT: foo.png]` text still in the manual
+        (not replaced with `![alt](path)`) is a missing asset. v0.3.1
+        only scanned `![alt](path)` links; this catches the half-fix
+        where the LLM writes the placeholder syntax but never
+        records a real asset."""
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "manual.md"
+            f.write_text(textwrap.dedent("""\
+                # Manual
+                [SCREENSHOT: login-sso.png]
+                [VIDEO: demo-flow.mp4]
+                [AI ANNOTATE: hero]
+            """))
+            r = run(["--json", str(f)])
+            data = json.loads(r.stdout)
+            check = next(c for c in data[0]["checks"] if c["name"] == "screenshot files exist")
+            # 3 placeholders, all unreplaced. AI ANNOTATE is also
+            # counted by this regex (matches `[AI ANNOTATE: x]`) but the
+            # AI ANNOTATE entry's "name" won't have a `.ext`, so
+            # it's still treated as unreplaced.
+            self.assertGreaterEqual(check["unreplaced_placeholder_count"], 2,
+                                    msg=f"expected ≥2 unreplaced placeholders, got {check}")
+            self.assertFalse(check["ok"])
+
+    def test_unreplaced_placeholder_in_code_fence_ignored(self):
+        """v0.3.2: `[SCREENSHOT: x]` text inside a fenced code block
+        (a doc example showing the syntax) must NOT count."""
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "manual.md"
+            f.write_text(textwrap.dedent("""\
+                # Manual
+                ```
+                [SCREENSHOT: doc-example.png]
+                [VIDEO: another.mp4]
+                ```
+            """))
+            r = run(["--json", str(f)])
+            data = json.loads(r.stdout)
+            check = next(c for c in data[0]["checks"] if c["name"] == "screenshot files exist")
+            self.assertEqual(check["unreplaced_placeholder_count"], 0)
+
+    def test_combined_image_link_and_placeholder_aggregation(self):
+        """v0.3.2: total = image links + unreplaced placeholders. A
+        manual with both kinds of references reports the right counts
+        and the right total."""
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as d:
+            img_dir = Path(d) / "img"
+            img_dir.mkdir()
+            Image.new("RGB", (1280, 800), "white").save(img_dir / "ok.png")
+            f = Path(d) / "manual.md"
+            f.write_text(textwrap.dedent("""\
+                # Manual
+                ![ok](img/ok.png)
+                [SCREENSHOT: not-yet.png]
+            """))
+            r = run(["--json", str(f)])
+            data = json.loads(r.stdout)
+            check = next(c for c in data[0]["checks"] if c["name"] == "screenshot files exist")
+            self.assertEqual(check["present"], 1)
+            self.assertEqual(check["unreplaced_placeholder_count"], 1)
+            self.assertEqual(check["threshold"], 2)
+            # 1 image link + 1 placeholder = 2 total
+            # 1 present + 1 unreplaced = 2 accounted for, but present (1)
+            # != total (2), so ok=False
+            self.assertFalse(check["ok"])
+
+    def test_human_output_shows_breakdown(self):
+        """v0.3.2: human output breaks down the 3 failure modes
+        (missing / placeholder / unreplaced) so the user can see WHY."""
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as d:
+            img_dir = Path(d) / "img"
+            img_dir.mkdir()
+            Image.new("RGB", (1, 1), "gray").save(img_dir / "stub.png")
+            f = Path(d) / "manual.md"
+            f.write_text(textwrap.dedent("""\
+                # Manual
+                ![stub](img/stub.png)
+                [SCREENSHOT: missing.png]
+            """))
+            r = run([str(f)])
+            # Breakdown should mention both 1x1 placeholder PNGs AND
+            # unreplaced [SCREENSHOT:]/[VIDEO:]
+            self.assertIn("1×1 placeholder PNGs", r.stdout)
+            self.assertIn("unreplaced", r.stdout)
+
 
 def textwrap_and_nowrite(s: str) -> str:
     """Helper: identity function to make code-fence tests readable."""

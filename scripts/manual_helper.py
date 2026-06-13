@@ -29,6 +29,11 @@ few primitives that are easy to get wrong in prose:
   * `parse-citations <md-path>`       — read the existing manual's Citations
                                         table and emit the path -> hash mapping
                                         as JSON
+  * `fill-citation-shas <md> [root]`  — v0.3.2: cross-reference the manual's
+                                        Citations with scan-artifacts and
+                                        emit a corrected table with real
+                                        SHA256 values. Closes the
+                                        "(auto)" placeholder loop.
   * `diff-artifacts <project-root> <md-path>`
                                       — combine the two: tell the skill which
                                         artifacts are NEW (not yet cited),
@@ -517,13 +522,19 @@ def check_recording_readiness(project_root: Path) -> dict:
             placeholders = scan_recording_placeholders(text)
             placeholder_count += len(placeholders)
             for p in placeholders:
-                # The placeholder name maps to a path like
-                # docs/user-manual/screenshots/<domain>/<name>.png
-                domain_dir = project_root / "docs" / "user-manual" / "screenshots" / (
-                    _domain_for_placeholder(md_file, p["name"])
+                # v0.3.2: try multiple candidate paths instead of
+                # only the canonical one. The eval agent's manuals
+                # used `screenshots/<domain>/<name>.png` relative to
+                # the .md file's dir (not the init-skill canonical
+                # path), so v0.3.1's single-path check missed them.
+                ext = ".mp4" if p["kind"] == "video" else ".png"
+                candidates = _candidate_paths_for_placeholder(
+                    md_file, p["name"], project_root
                 )
-                candidate = domain_dir / f"{p['name']}.png"
-                if not candidate.exists():
+                # Replace the default .png ext in candidates with the
+                # right one for the placeholder's kind
+                candidates = [c.with_suffix(ext) for c in candidates]
+                if not any(c.exists() for c in candidates):
                     missing_file_count += 1
     if placeholder_count == 0:
         checks.append({
@@ -583,6 +594,37 @@ def _domain_for_placeholder(md_file: Path, name: str) -> str:
         if stem.endswith(suffix):
             stem = stem[: -len(suffix)]
     return stem or "misc"
+
+
+def _candidate_paths_for_placeholder(
+    md_file: Path, name: str, project_root: Path
+) -> list[Path]:
+    """v0.3.2: for a `[SCREENSHOT: <name>]` / `[VIDEO: <name>]` placeholder
+    inside `md_file`, return the list of candidate on-disk paths where
+    the asset might live, in priority order. ANY of these existing
+    counts as "asset present" (v0.3.1 only checked path #1 and
+    missed all the others — that's the bug the eval exposed).
+
+    Paths tried, in order:
+      1. Canonical from init-skill:  <root>/docs/user-manual/screenshots/<domain>/<name>.<ext>
+      2. Relative-to-md bare:        <md_dir>/<name>.<ext>
+      3. Relative-to-md with dir:    <md_dir>/screenshots/<domain>/<name>.<ext>
+         (this is what the eval agent's grc_claude2_副本 actually used —
+          manual at docs/user-manual/manual/, asset at docs/user-manual/manual/screenshots/<domain>/)
+      4. Alt relative:               <md_dir>/../screenshots/<name>.<ext>
+
+    The extension defaults to .png; .mp4 is the other common one. We
+    only try the extension that matches the placeholder's "kind" but
+    the caller passes the right one already.
+    """
+    md_dir = md_file.parent
+    domain = _domain_for_placeholder(md_file, name)
+    return [
+        project_root / "docs" / "user-manual" / "screenshots" / domain / f"{name}.png",
+        md_dir / f"{name}.png",
+        md_dir / "screenshots" / domain / f"{name}.png",
+        md_dir / ".." / "screenshots" / f"{name}.png",
+    ]
 
 
 def _print_recording_readiness_banner(readiness: dict) -> None:
@@ -949,6 +991,203 @@ def parse_citations(path: Path) -> dict:
         })
 
     return result
+
+
+# ---------- Fill in citation SHAs from scan-artifacts (v0.3.2) ----------
+
+
+def fill_citation_shas(manual_path: Path, project_root: Path) -> dict:
+    """v0.3.2 (P1 #9 from eval report): the LLM agent often writes
+    `(auto)` or an empty string as the SHA in the Citations table,
+    because it doesn't have the real SHA256. This subcommand closes
+    that loop: read the existing Citations, cross-reference with
+    scan-artifacts (which has real SHAs), and emit a corrected
+    table the agent just pastes in.
+
+    Returns:
+      {
+        "replacements": [{"path": ..., "oldsha": ..., "newsha": ...}, ...],
+        "unresolved":   [{"path": ..., "current_sha": ...}, ...],
+        "markdown_table": "## Citations\n\n### Project artifacts\n| ... |"
+      }
+
+    `replacements` = citations that were updated (had a placeholder
+    or stale SHA; we have a real one now).
+    `unresolved`   = citations where the on-disk artifact doesn't
+    exist (file path typo, or the file was deleted). The agent must
+    investigate these manually.
+    `markdown_table` = the corrected table fragment (human form)
+    or absent if --json was used.
+    """
+    cited = parse_citations(manual_path)["artifacts"]
+    scanned = scan_artifacts(project_root)
+    scanned_by_path = {s["path"]: s for s in scanned}
+
+    replacements: list[dict] = []
+    unresolved: list[dict] = []
+    for entry in cited:
+        path = entry["path"]
+        old_sha = entry.get("hash", "")
+        scan_entry = scanned_by_path.get(path)
+        new_sha: str | None = None
+        if scan_entry is not None:
+            new_sha = scan_entry.get("hash", "")
+        else:
+            # v0.3.2 fallback: scan_artifacts only walks
+            # docs/superpowers/{kind}/*.md, but manuals can cite
+            # arbitrary project files (docs/design/, backend/...).
+            # If the cited path exists on disk, hash it directly.
+            abs_path = (project_root / path).resolve()
+            if abs_path.exists() and abs_path.is_file():
+                try:
+                    raw = abs_path.read_bytes()
+                    # Full 64-char SHA (not the 16-char prefix that
+                    # scan_artifacts uses for compactness in the
+                    # citation table — for the fill-in we want the
+                    # authoritative value).
+                    new_sha = hashlib.sha256(raw).hexdigest()
+                except OSError:
+                    pass
+        if new_sha is None:
+            # File referenced in citations but not on disk (or unreadable)
+            unresolved.append({"path": path, "current_sha": old_sha})
+            continue
+        # Only emit a replacement if the SHA actually changed (avoids
+        # no-op diffs that the agent would have to inspect)
+        if old_sha == new_sha:
+            continue
+        replacements.append({
+            "path": path,
+            "oldsha": old_sha,
+            "newsha": new_sha,
+        })
+
+    markdown_table = _render_filled_citations_table(manual_path, replacements, unresolved)
+    return {
+        "replacements": replacements,
+        "unresolved": unresolved,
+        "markdown_table": markdown_table,
+    }
+
+
+def _render_filled_citations_table(
+    manual_path: Path,
+    replacements: list[dict],
+    unresolved: list[dict],
+) -> str:
+    """Render a corrected Citations table fragment. Reads the original
+    manual, finds the Citations section, and replaces the SHA cell
+    for any path in `replacements`. Unresolved paths are left as-is
+    but tagged with a stderr-style comment so the agent notices.
+
+    If the manual has no Citations section yet (scaffold-only), this
+    returns a template the agent can paste in.
+    """
+    if not manual_path.exists():
+        return ""
+    text = manual_path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+
+    # Find the Citations section
+    cite_idx = None
+    for idx, line in enumerate(lines):
+        if line.strip() == CITATIONS_HEADING:
+            cite_idx = idx
+            break
+    if cite_idx is None:
+        return ""  # No citations section; nothing to fix
+
+    # Build a lookup path -> newsha (only the ones that changed)
+    path_to_new_sha = {r["path"]: r["newsha"] for r in replacements}
+    unresolved_paths = {r["path"] for r in unresolved}
+
+    # Walk the table under "### Project artifacts" and rewrite SHA cells
+    in_artifacts = False
+    for idx in range(cite_idx, len(lines)):
+        stripped = lines[idx].strip()
+        if stripped == ARTIFACTS_SUBHEADING:
+            in_artifacts = True
+            continue
+        if in_artifacts and (stripped.startswith("## ") or stripped.startswith("### ")):
+            break  # Left the artifacts subtable
+        if not in_artifacts:
+            continue
+        if not stripped.startswith("|"):
+            continue
+        # Try to identify a path on this row and rewrite its SHA
+        cells = _split_table_row(lines[idx])
+        if len(cells) < 4:
+            continue
+        path_cell = cells[0].strip()
+        m = re.match(r"^\[(?P<label>[^\]]+)\]\((?P<target>[^)]+)\)$", path_cell)
+        bare_path = m.group("target") if m else path_cell
+        # Normalize to project-root-relative for lookup
+        normalized = _normalize_artifact_path(bare_path, manual_path)
+        if normalized in path_to_new_sha:
+            new_sha = path_to_new_sha[normalized]
+            # Replace the hash cell (index 3). Preserve backticks
+            # if the original had them.
+            old_cell = cells[3]
+            wrapped = old_cell.startswith("`") and old_cell.endswith("`")
+            replacement = f"`{new_sha}`" if wrapped else new_sha
+            # Rebuild the line: same number of | separators
+            new_cells = cells[:3] + [replacement] + cells[4:]
+            lines[idx] = "|" + "|".join(new_cells) + "|"
+        elif normalized in unresolved_paths:
+            # Tag unresolved with a trailing `⚠️ unresolved` so the
+            # agent sees it
+            if "⚠️" not in cells[3]:
+                cells[3] = cells[3] + " ⚠️ unresolved"
+                lines[idx] = "|" + "|".join(cells) + "|"
+
+    return "\n".join(lines[cite_idx:])
+
+
+def _cmd_fill_citation_shas(args: list[str]) -> int:
+    """v0.3.2 CLI: emit the corrected Citations table with real SHAs."""
+    # Filter out flag args before counting positionals
+    positional = [a for a in args if not a.startswith("--")]
+    if len(positional) < 1 or len(positional) > 2:
+        print("usage: manual_helper.py fill-citation-shas [--json] <manual.md> [project-root]",
+              file=sys.stderr)
+        return 2
+    manual_path = Path(positional[0])
+    project_root = Path(positional[1]) if len(positional) == 2 else _infer_project_root(manual_path)
+    if not manual_path.exists():
+        print(f"error: {manual_path} not found", file=sys.stderr)
+        return 1
+    result = fill_citation_shas(manual_path, project_root)
+    if "--json" in args:
+        # Drop the markdown_table from JSON (it's noisy for machines)
+        out = {k: v for k, v in result.items() if k != "markdown_table"}
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+    else:
+        if not result["replacements"] and not result["unresolved"]:
+            print("OK: all citation SHAs are already up-to-date.")
+            return 0
+        print(f"=== Citation SHA Fill-In ({manual_path}) ===")
+        print()
+        if result["replacements"]:
+            print(f"  Replaced {len(result['replacements'])} placeholder/stale SHAs:")
+            for r in result["replacements"]:
+                old = r["oldsha"] or "(empty)"
+                print(f"    {r['path']}")
+                print(f"      {old!r}  →  {r['newsha'][:16]}...")
+        if result["unresolved"]:
+            print()
+            print(f"  Unresolved ({len(result['unresolved'])} cited paths not on disk):")
+            for u in result["unresolved"]:
+                print(f"    {u['path']}  (current SHA: {u['current_sha']!r})")
+        print()
+        print("--- Corrected Citations table (paste into your manual) ---")
+        print(result["markdown_table"])
+    return 0
+
+
+def _infer_project_root(manual_path: Path) -> Path:
+    """Best-effort: if the manual is at docs/user-manual/manual/*.md,
+    assume project_root is the cwd. Otherwise return cwd as-is."""
+    return Path.cwd()
 
 
 # ---------- Diff: which artifacts need processing on this run? ----------
@@ -1762,6 +2001,9 @@ def main(argv: list[str]) -> int:
         json.dump(result, sys.stdout, indent=2)
         sys.stdout.write("\n")
         return 0
+
+    if cmd == "fill-citation-shas":
+        return _cmd_fill_citation_shas(argv[2:])
 
     if cmd == "diff-artifacts":
         if len(argv) != 4:

@@ -128,6 +128,54 @@ class RecordingReadinessTests(unittest.TestCase):
         # Overall status is now RED (not just yellow) because of this FAIL
         self.assertEqual(r["status"], "red")
 
+    # === v0.3.2: unified path resolution (3.1) ===
+
+    def test_placeholder_in_manual_subdir_finds_file(self):
+        """v0.3.2: when the eval agent puts screenshots at
+        `docs/user-manual/manual/screenshots/<domain>/<name>.png`
+        (relative-to-manual-file path, NOT the canonical
+        `docs/user-manual/screenshots/<domain>/...` from init-skill),
+        the candidate-path fallback in
+        `_candidate_paths_for_placeholder` should find the file
+        and the check should be OK (not FAIL).
+
+        This is the bug v0.3.1 introduced: the canonical-path-only
+        check reported grc_claude2_副本's 4 placeholders as missing
+        even though the files existed at the relative path.
+        """
+        manual_dir = self.root / "docs" / "user-manual" / "manual"
+        manual_dir.mkdir(parents=True)
+        # The eval agent's pattern: screenshots dir is a sibling of
+        # the manual, NOT under docs/user-manual/screenshots/.
+        shots_dir = self.root / "docs" / "user-manual" / "manual" / "screenshots" / "contract"
+        shots_dir.mkdir(parents=True)
+        (shots_dir / "hero.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+        (manual_dir / "contract-user-manual.md").write_text(
+            "[SCREENSHOT: hero.png]\n"
+        )
+        r = manual_helper.check_recording_readiness(self.root)
+        ph_check = next(c for c in r["checks"] if c["name"] == "manual placeholders vs. files")
+        # The 1 placeholder should be found via the relative-path fallback
+        self.assertEqual(ph_check["status"], "OK",
+                         msg=f"expected to find hero.png via relative path; got {ph_check['detail']}")
+
+    def test_placeholder_in_init_skill_canonical_path_still_works(self):
+        """v0.3.2 backward compat: the canonical init-skill path
+        `docs/user-manual/screenshots/<domain>/<name>.png` still
+        works after the candidate-path refactor."""
+        manual_dir = self.root / "docs" / "user-manual" / "manual"
+        manual_dir.mkdir(parents=True)
+        # canonical path (from init-skill)
+        shots_dir = self.root / "docs" / "user-manual" / "screenshots" / "contract"
+        shots_dir.mkdir(parents=True)
+        (shots_dir / "hero.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+        (manual_dir / "contract-user-manual.md").write_text(
+            "[SCREENSHOT: hero.png]\n"
+        )
+        r = manual_helper.check_recording_readiness(self.root)
+        ph_check = next(c for c in r["checks"] if c["name"] == "manual placeholders vs. files")
+        self.assertEqual(ph_check["status"], "OK")
+
     # --- CLI dispatch ---
 
     def test_cli_subcommand_human_output(self):
