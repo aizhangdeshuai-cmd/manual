@@ -81,11 +81,18 @@ BAD = """\
 
 class ValidateOutputTests(unittest.TestCase):
     def test_good_file_passes_human(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
-            f.write(GOOD)
-            path = f.name
-        try:
-            r = run([path])
+        with tempfile.TemporaryDirectory() as d:
+            # v0.3.1: the new "screenshot files exist" check resolves
+            # `![a](img/a.png)` relative to the markdown's directory. The
+            # GOOD fixture's images must exist on disk for the check
+            # to pass.
+            img_dir = Path(d) / "img"
+            img_dir.mkdir()
+            (img_dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+            (img_dir / "b.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+            f = Path(d) / "good.md"
+            f.write_text(GOOD)
+            r = run([str(f)])
             self.assertEqual(r.returncode, 0, msg=r.stdout + r.stderr)
             self.assertIn("[OK", r.stdout)
             for needle in (
@@ -95,10 +102,10 @@ class ValidateOutputTests(unittest.TestCase):
                 "appendix-A 6-col table=2",
                 "role-permission matrix=1",
                 "screenshot count=2",
+                # v0.3.1: new file-existence check rendered as present/total
+                "screenshot files exist=2/2",
             ):
                 self.assertIn(needle, r.stdout, msg="missing " + needle)
-        finally:
-            os.unlink(path)
 
     def test_bad_file_fails_human(self):
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
@@ -131,13 +138,24 @@ class ValidateOutputTests(unittest.TestCase):
             self.assertEqual(r.returncode, 0, msg=r.stderr)
             data = json.loads(r.stdout)
             self.assertEqual(len(data), 1)
-            self.assertTrue(data[0]["ok"])
-            self.assertEqual(len(data[0]["checks"]), 6)
+            # The new file-existence check will FAIL here (images don't
+            # exist on disk), so the file-level ok is False.
+            self.assertFalse(data[0]["ok"])
+            # v0.3.1: 7 checks now (was 6).
+            self.assertEqual(len(data[0]["checks"]), 7)
+            names = [c["name"] for c in data[0]["checks"]]
+            self.assertIn("screenshot files exist", names)
         finally:
             os.unlink(path)
 
     def test_multiple_files(self):
         with tempfile.TemporaryDirectory() as d:
+            # v0.3.1: create the real image files good.md references so
+            # the new "screenshot files exist" check passes for good.md
+            img_dir = Path(d) / "img"
+            img_dir.mkdir()
+            (img_dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+            (img_dir / "b.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
             p1 = Path(d) / "good.md"
             p2 = Path(d) / "bad.md"
             p1.write_text(GOOD)
@@ -209,6 +227,147 @@ class ValidateOutputTests(unittest.TestCase):
             self.assertGreaterEqual(check["hits"], 3, f"got {check['hits']}")
         finally:
             os.unlink(path)
+
+    # === v0.3.1: screenshot files exist check ===
+
+    def test_screenshot_files_exist_passes_when_all_files_present(self):
+        """v0.3.1: when every `![alt](path.png)` reference points to an
+        existing file, the check is ok=True."""
+        with tempfile.TemporaryDirectory() as d:
+            img_dir = Path(d) / "img"
+            img_dir.mkdir()
+            (img_dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+            (img_dir / "b.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+            (img_dir / "c.jpg").write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 8)
+            f = Path(d) / "manual.md"
+            f.write_text(textwrap.dedent("""\
+                # Manual
+                ![a](img/a.png)
+                ![b](img/b.png)
+                ![c](img/c.jpg)
+            """))
+            r = run(["--json", str(f)])
+            data = json.loads(r.stdout)
+            check = next(c for c in data[0]["checks"] if c["name"] == "screenshot files exist")
+            self.assertEqual(check["present"], 3)
+            self.assertEqual(check["threshold"], 3)
+            self.assertEqual(check["missing_count"], 0)
+            self.assertTrue(check["ok"])
+
+    def test_screenshot_files_exist_fails_when_files_missing(self):
+        """v0.3.1: missing files → check ok=False, present < threshold,
+        missing_paths lists the offenders. The OLD check ("screenshot
+        count" = mentions) STILL passes — this is the bug the eval
+        agent exploited: 26 placeholders, 0 real files, validate
+        passed. With this fix it FAILS."""
+        with tempfile.TemporaryDirectory() as d:
+            # Don't create any image files
+            f = Path(d) / "manual.md"
+            f.write_text(textwrap.dedent("""\
+                # Manual
+                ![hero](img/hero.png)
+                ![list](img/list.png)
+                ![detail](img/detail.png)
+            """))
+            r = run(["--json", str(f)])
+            data = json.loads(r.stdout)
+            check = next(c for c in data[0]["checks"] if c["name"] == "screenshot files exist")
+            self.assertEqual(check["present"], 0)
+            self.assertEqual(check["threshold"], 3)
+            self.assertEqual(check["missing_count"], 3)
+            self.assertFalse(check["ok"])
+            # All 3 paths are listed (we cap at 5; 3 fits)
+            for ref in ("img/hero.png", "img/list.png", "img/detail.png"):
+                self.assertIn(ref, check["missing_paths"])
+            # The OLD check still passes (count=3 >= 2) — the eval
+            # agent's exact failure pattern
+            old_check = next(c for c in data[0]["checks"] if c["name"] == "screenshot count")
+            self.assertTrue(old_check["ok"])
+            # But the file-level ok is now False (one check failed)
+            self.assertFalse(data[0]["ok"])
+
+    def test_screenshot_files_exist_human_output_shows_missing(self):
+        """v0.3.1: human-form output should show present/total + missing
+        paths so the operator can see at a glance which references are
+        placeholders."""
+        with tempfile.TemporaryDirectory() as d:
+            # Create only ONE of the two referenced images
+            img_dir = Path(d) / "img"
+            img_dir.mkdir()
+            (img_dir / "present.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+            f = Path(d) / "manual.md"
+            f.write_text(textwrap.dedent("""\
+                # Manual
+                ![p](img/present.png)
+                ![m](img/missing.png)
+            """))
+            r = run([str(f)])
+            # 1 of 2 present, 1 missing — the missing path appears in output
+            self.assertIn("screenshot files exist=1/2 (1 missing)", r.stdout)
+            self.assertIn("img/missing.png", r.stdout)
+            # The OK/FAIL header should be FAIL (file-level ok is false)
+            self.assertIn("[FAIL", r.stdout)
+
+    def test_screenshot_files_exist_strict_exits_1(self):
+        """v0.3.1: with --strict, missing files cause exit 1 (so CI
+        gates on this)."""
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "manual.md"
+            f.write_text("![x](img/x.png)\n")
+            r = run(["--strict", str(f)])
+            self.assertEqual(r.returncode, 1, msg=r.stdout)
+
+    def test_screenshot_files_exist_ignores_http_urls(self):
+        """v0.3.1: external image URLs (CDN, GitHub raw) must NOT be
+        checked for local existence. The user might link to
+        https://example.com/hero.png legitimately."""
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "manual.md"
+            f.write_text(textwrap.dedent("""\
+                # Manual
+                ![local](img/local.png)
+                ![cdn](https://cdn.example.com/img.png)
+            """))
+            # Don't create img/local.png — should be missing
+            r = run(["--json", str(f)])
+            data = json.loads(r.stdout)
+            check = next(c for c in data[0]["checks"] if c["name"] == "screenshot files exist")
+            # Only the LOCAL ref is checked; the CDN URL is excluded
+            self.assertEqual(check["present"], 0)
+            self.assertEqual(check["threshold"], 1)
+            self.assertEqual(check["missing_count"], 1)
+            self.assertNotIn("https://cdn.example.com/img.png", check["missing_paths"])
+
+    def test_screenshot_files_exist_strips_query_strings(self):
+        """v0.3.1: paths like `img/x.png?v=123` should be checked as
+        `img/x.png` (the query string is a cache-buster, not part of
+        the file path)."""
+        with tempfile.TemporaryDirectory() as d:
+            img_dir = Path(d) / "img"
+            img_dir.mkdir()
+            (img_dir / "x.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+            f = Path(d) / "manual.md"
+            f.write_text("![x](img/x.png?v=123)\n")
+            r = run(["--json", str(f)])
+            data = json.loads(r.stdout)
+            check = next(c for c in data[0]["checks"] if c["name"] == "screenshot files exist")
+            self.assertEqual(check["present"], 1)
+            self.assertTrue(check["ok"])
+
+    def test_screenshot_files_exist_zero_refs_is_ok(self):
+        """v0.3.1: a manual with NO image references is vacuously OK for
+        the file-existence check (the OTHER checks like "screenshot
+        count >= 2" still apply, so this won't accidentally pass a
+        barebones manual)."""
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "manual.md"
+            f.write_text("# Manual\nNo images here.\n")
+            r = run(["--json", str(f)])
+            data = json.loads(r.stdout)
+            check = next(c for c in data[0]["checks"] if c["name"] == "screenshot files exist")
+            self.assertEqual(check["present"], 0)
+            self.assertEqual(check["threshold"], 0)
+            self.assertTrue(check["ok"])
 
 
 def textwrap_and_nowrite(s: str) -> str:
