@@ -564,5 +564,168 @@ C
 """
 
 
+class ScreenshotUniqueTests(unittest.TestCase):
+    """v0.4.0: opt-in --unique check for content-hash duplicates."""
+
+    def _write_png(self, path: Path, payload: bytes = b"\x00" * 32) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Use a valid PNG header so PIL doesn't choke if loaded. We
+        # only need a stable hash for the check; size doesn't matter.
+        path.write_bytes(b"\x89PNG\r\n\x1a\n" + payload)
+
+    def _make_manual(self, d: str, refs: list[str]) -> Path:
+        f = Path(d) / "manual.md"
+        lines = ["# Manual", ""]
+        for ref in refs:
+            lines.append(f"![x]({ref})")
+        f.write_text("\n".join(lines))
+        return f
+
+    def test_unique_passes_when_all_files_distinct(self):
+        """v0.4.0: when 3 referenced PNGs have 3 distinct SHA256,
+        --unique reports 0 duplicates, ok=True."""
+        with tempfile.TemporaryDirectory() as d:
+            img = Path(d) / "img"
+            self._write_png(img / "a.png", b"a" * 32)
+            self._write_png(img / "b.png", b"b" * 32)
+            self._write_png(img / "c.png", b"c" * 32)
+            f = self._make_manual(d, ["img/a.png", "img/b.png", "img/c.png"])
+            r = run(["--json", "--unique", str(f)])
+            data = json.loads(r.stdout)
+            check = next(
+                c for c in data[0]["checks"]
+                if c["name"] == "screenshot unique (no duplicate content)"
+            )
+            self.assertTrue(check["ok"])
+            self.assertEqual(check["duplicate_count"], 0)
+            self.assertEqual(check["unique_hashes"], 3)
+
+    def test_unique_fails_when_two_files_share_content(self):
+        """v0.4.0: dashboard-home.png and module-map.png both
+        pointing at the same PNG bytes → ok=False, duplicate group
+        contains both filenames."""
+        with tempfile.TemporaryDirectory() as d:
+            img = Path(d) / "img"
+            # Same bytes = same SHA256 = bug we're catching.
+            self._write_png(img / "dashboard-home.png", b"X" * 32)
+            self._write_png(img / "module-map.png", b"X" * 32)
+            self._write_png(img / "real-other.png", b"Y" * 32)
+            f = self._make_manual(
+                d,
+                ["img/dashboard-home.png", "img/module-map.png", "img/real-other.png"],
+            )
+            r = run(["--json", "--unique", str(f)])
+            data = json.loads(r.stdout)
+            check = next(
+                c for c in data[0]["checks"]
+                if c["name"] == "screenshot unique (no duplicate content)"
+            )
+            self.assertFalse(check["ok"])
+            self.assertEqual(check["duplicate_count"], 1)
+            self.assertEqual(set(check["duplicates"][0]["files"]),
+                             {"dashboard-home.png", "module-map.png"})
+            self.assertEqual(check["duplicates"][0]["occurrences"], 2)
+            # Overall file should be FAIL even without --strict
+            # (--unique flips its own ok=False).
+            self.assertFalse(data[0]["ok"])
+
+    def test_unique_off_by_default(self):
+        """v0.4.0: WITHOUT --unique, the check is NOT run, so a
+        file with duplicate-content images still passes overall
+        (backwards compat with v0.3.x manuals)."""
+        # Use the shared GOOD fixture (already passes 7 base checks)
+        # but with TWO identical images injected to prove the
+        # --unique check is what's missing, not the base checks.
+        with tempfile.TemporaryDirectory() as d:
+            img_dir = Path(d) / "img"
+            img_dir.mkdir()
+            self._write_png(img_dir / "a.png", b"X" * 32)
+            self._write_png(img_dir / "b.png", b"X" * 32)
+            f = Path(d) / "good.md"
+            # GOOD references img/a.png and img/b.png (line 71-72).
+            f.write_text(GOOD)
+            r = run(["--json", str(f)])  # no --unique
+            data = json.loads(r.stdout)
+            names = [c["name"] for c in data[0]["checks"]]
+            self.assertNotIn(
+                "screenshot unique (no duplicate content)", names,
+                "unique check should be opt-in; off by default"
+            )
+            self.assertTrue(data[0]["ok"])
+
+    def test_unique_allow_whitelist(self):
+        """v0.4.0: --unique-allow=logo.png,branding.png lets you
+        intentionally reuse a shared asset without flagging.
+
+        Setup: 3 PNGs sharing ONE hash, but logo.png is whitelisted.
+        Without --unique-allow: 3-way duplicate (FAIL).
+        With --unique-allow=logo.png: 2-way duplicate (still FAIL,
+        proves filter only excluded the one whitelisted name).
+        With --unique-allow=logo.png,header.png,branding.png:
+        1 hash with 0 non-whitelisted references (PASS).
+        """
+        with tempfile.TemporaryDirectory() as d:
+            img = Path(d) / "img"
+            self._write_png(img / "logo.png", b"X" * 32)
+            self._write_png(img / "header.png", b"X" * 32)
+            self._write_png(img / "branding.png", b"X" * 32)
+            self._write_png(img / "real.png", b"Y" * 32)
+            f = self._make_manual(
+                d, ["img/logo.png", "img/header.png",
+                    "img/branding.png", "img/real.png"]
+            )
+            # Case A: whitelist excludes ALL 3 colliders -> PASS
+            r = run([
+                "--json", "--unique",
+                "--unique-allow=logo.png,header.png,branding.png",
+                str(f),
+            ])
+            data = json.loads(r.stdout)
+            check = next(
+                c for c in data[0]["checks"]
+                if c["name"] == "screenshot unique (no duplicate content)"
+            )
+            self.assertTrue(
+                check["ok"],
+                msg=f"all 3 colliders whitelisted should PASS, got: {check}",
+            )
+            # Case B: whitelist excludes only 1 -> still 2-way FAIL
+            r = run([
+                "--json", "--unique",
+                "--unique-allow=logo.png",
+                str(f),
+            ])
+            data = json.loads(r.stdout)
+            check = next(
+                c for c in data[0]["checks"]
+                if c["name"] == "screenshot unique (no duplicate content)"
+            )
+            self.assertFalse(
+                check["ok"],
+                msg=f"2 remaining colliders should FAIL, got: {check}",
+            )
+            self.assertEqual(
+                set(check["duplicates"][0]["files"]),
+                {"header.png", "branding.png"},
+            )
+
+    def test_unique_ignores_missing_files(self):
+        """v0.4.0: when a referenced PNG doesn't exist on disk,
+        _check_screenshot_unique skips it (file-existence is
+        check #7's job; we shouldn't double-report)."""
+        with tempfile.TemporaryDirectory() as d:
+            # Don't create the file
+            f = self._make_manual(d, ["img/missing.png"])
+            r = run(["--json", "--unique", str(f)])
+            data = json.loads(r.stdout)
+            check = next(
+                c for c in data[0]["checks"]
+                if c["name"] == "screenshot unique (no duplicate content)"
+            )
+            # 0 unique hashes, 0 duplicates, ok=True
+            self.assertTrue(check["ok"])
+            self.assertEqual(check["unique_hashes"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

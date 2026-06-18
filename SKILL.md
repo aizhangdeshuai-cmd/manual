@@ -163,6 +163,8 @@ A: ...
 
 按"权限 / 数据 / 操作 / 计费"4 类组织(类别由 LLM 从 personas + extract-roles.py 输出派生)。
 
+**v0.4.0 硬约束**:**每类至少 3 个 Q**(全分册 ≥ 12 Q)。少于 3 个说明该类问题没梳理透,会让最终用户卡住没地方查。模板示例里只有 2 个 Q 是**反例**,不是目标。
+
 ### 2.6 视频与截图并行
 
 任务卡中**关键步骤**配视频,其他步骤配截图。
@@ -430,6 +432,7 @@ narration_rate: "+0%"  # 可选,语速调节
 > | 5 | `role-permission matrix` | 含 `## 角色与权限速查` / `角色权限速查` / `角色与权限` / `Role Quick Reference` 等（同义）| ≥ 1 |
 > | 6 | `screenshot count` | 含 `![alt](path.png)` / `![alt](path.jpg)` 链接次数 | ≥ 2 |
 > | 7 | `screenshot files exist` | **每条** `![alt](path.png)` 对应文件 ≥ 50×50 px（**不**是 1×1 占位）+ 文本里没有未替换的 `[SCREENSHOT: x]` / `[VIDEO: x]` 占位 | 全部 |
+| 8 (v0.4.0, opt-in) | `screenshot unique` | 所有引用 PNG 的 SHA256 中,没有 2+ 不同文件名指向同一 hash(防 recorder 重复截图) | 全部(传 `--unique` 才检查) |
 >
 > **LLM 写作 checklist**（写完一张卡就 grep 一遍）：
 > - [ ] 这张卡 7 字段全（适用角色 / 前置条件 / 操作前必看 / 步骤 / 成功后看到 / 字段说明 / 如果你卡住了 / 相关任务）
@@ -437,7 +440,7 @@ narration_rate: "+0%"  # 可选,语速调节
 > - [ ] 至少 1 个视觉锚点 emoji（⚠️ / 💡 / ❌ / 📌）
 > - [ ] 引用的图都是**真实文件**（≥ 50×50 PNG），不是 1×1 灰
 > - [ ] 没有任何未替换的 `[SCREENSHOT: xxx.png]` / `[VIDEO: xxx.mp4]` 占位
-> - [ ] 跑了 `python3 -m manual_helper fill-citation-shas <this.md>` 把 `(auto)` 替换成真 SHA
+> - [x] **必跑** `python3 -m manual_helper fill-citation-shas <this.md>` 把 `(auto)` 替换成真 SHA(不跑则 validate FAIL)
 >
 > 跑完：`python3 scripts/validate-output.py docs/user-manual/manual/<name>.md --strict` — 必须 exit 0。
 
@@ -589,8 +592,24 @@ PERMS=$(grep -c "## 角色与权限速查" "$F")
 SHOTS=$(grep -c '!\[' "$F")
 [ "$SHOTS" -ge 2 ] || { echo "WARN: 截图 < 2"; }
 
+# 验证 7(v0.3.2): Citations SHA256 必须已填,不能再有 (auto) 占位
+AUTO=$(grep -c "(auto)" "$F")
+[ "$AUTO" -eq 0 ] || { echo "FAIL: Citations 仍有 $AUTO 个 (auto) 占位 — 跑 fill-citation-shas"; exit 1; }
+
+# v0.4.0(opt-in): 截图去重 — 同 SHA256 不应被 2+ 不同文件名引用
+# 默认不强制,跑 `validate-output.py --unique` 才生效
+# 建议在 CI 中跑,首次生成时必跑;已有手册用 --unique-allow 显式放行
+
 echo "OK: $F"
 ```
+
+**v0.3.2 补充**: 写完每本手册后,执行方**必须**跑一次:
+
+```bash
+python3 -m manual_helper fill-citation-shas docs/user-manual/manual/<name>.md
+```
+
+把 Citations 表里的 `(auto)` 占位替换成真实 SHA256 哈希。这一步是 §7 工具表里的 `fill-citation-shas` 子命令,**不跑**则 §5.4 验证 7 直接 FAIL。
 
 **任一 FAIL → 回到 5.3 让 LLM 重写该节,不重写整本**。
 

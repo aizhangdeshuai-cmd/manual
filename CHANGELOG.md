@@ -4,6 +4,88 @@ Top-level changelog for the user-manual skill. The recorder opt-in
 plugin (`recorder/`) has its own changelog at `recorder/CHANGELOG.md` —
 versioned in lockstep with the main skill.
 
+## 0.4.0 (2026-06-18) — quality guardrails (citation SHA + screenshot dedup)
+
+### Headline: catch "looks fine, isn't fine" outputs automatically
+
+The eval report from 2026-06-13 flagged 3 P0/P1 issues that the LLM
+kept re-introducing on each run:
+
+1. **Citations table filled with `(auto)` placeholders** — the
+   `fill-citation-shas` helper exists in `manual_helper.py` but the
+   LLM agent kept skipping it, leaving 14 lines of `(auto)` per
+   manual.
+2. **Same screenshot bytes referenced by 2+ filenames** — recorder's
+   `_handle_screenshot` doesn't require an intervening `click` step
+   between two `screenshot` actions, so back-to-back screenshots of
+   the same page produce byte-identical PNGs (e.g. `dashboard-home.png`
+   == `module-map.png` in the overview manual).
+3. **Q&A sections too short** — typical 2-5 Qs per manual, no
+   category hit the recommended 3-per-class minimum.
+
+v0.4.0 hardens all three with **automated checks** so the LLM
+can't silently produce a "passes validate but is actually broken"
+output.
+
+### Added — `validate-output.py` 8th check (opt-in `--unique`)
+
+- New flag: `python3 scripts/validate-output.py --unique <file.md>`
+  runs the 8th check `screenshot unique (no duplicate content)`.
+- Default OFF: existing manuals that intentionally reuse assets
+  (e.g. logo) are not retroactively broken.
+- New flag: `--unique-allow=logo.png,branding.png` — whitelist
+  intentionally shared files by basename.
+- The check SHA256s every referenced PNG, groups them by hash,
+  and flags any hash referenced by 2+ distinct filenames.
+- Performance: ~100ms for 50 images, no external deps.
+- 5 new unit tests cover: distinct pass, duplicate fail, opt-out,
+  whitelist, missing-file skip.
+
+### Added — `validate-output.py` regression: `(auto)` Citations
+
+- SKILL.md §5.4 now treats `(auto)` in the SHA256 column as a
+  hard FAIL. The shell snippet for §5.4 got a 7th grep:
+
+  ```bash
+  AUTO=$(grep -c "(auto)" "$F")
+  [ "$AUTO" -eq 0 ] || { echo "FAIL: Citations 仍有 $AUTO 个 (auto) 占位"; exit 1; }
+  ```
+
+- LLM writing checklist now marks `fill-citation-shas` as
+  **必跑** (was optional before).
+
+### Changed — SKILL.md §2.5 Q&A minimums
+
+- Each Q&A category now requires **≥ 3 questions** (was implicit).
+- The total Q&A per manual target is now **≥ 12 questions** across
+  4 categories (was 2-5 typical, sometimes 8).
+
+### Tests
+
+- `scripts/tests/test_validate_output.py`: 98 → 103 tests
+  (+5 for the new unique check class)
+- All other test suites untouched and passing.
+
+### Why these changes
+
+The 2026-06-13 evaluation report (file:
+`grc_claude2_副本/docs/user-manual/SKILL_EVALUATION_REPORT.md`)
+found that **"everything passes validate, but the user still gets
+a broken manual"** was the dominant failure mode. The fixes above
+shift three quality bars from "review must catch" to "validate
+must catch" — closing the loop on the eval report's top 3
+remaining issues.
+
+### Migration
+
+- Existing v0.3.x manuals: keep using `validate-output.py` without
+  `--unique` — no behavior change. The 7 base checks still pass.
+- New runs / CI: pass `--unique` after generation to catch
+  duplicate-content screenshots.
+- Citations `(auto)` is now a hard FAIL — run
+  `manual_helper fill-citation-shas` on existing manuals once
+  to bring them up to spec.
+
 ## 0.3.2 (2026-06-18) — video narration (TTS voiceover)
 
 ### Hotfix: `tts.synthesize` now refuses to be called from a running event loop

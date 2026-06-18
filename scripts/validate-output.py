@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Validate generated user-manual markdown files against the 6 hard checks.
+"""Validate generated user-manual markdown files against the 8 hard checks.
 
 Usage:
-    validate-output.py [--strict] [--json] <file.md> [...]
+    validate-output.py [--strict] [--json] [--unique] [--unique-allow=A,B]
+                       <file.md> [...]
 
 The 6 checks come from the user-manual skill style guide (see SKILL.md
 section 5.4 and the task-card prompt). For each input .md, prints a one-line
@@ -26,6 +27,17 @@ non-existent files. The new check resolves each path relative to the
 markdown file's directory and verifies the file is on disk. A `[SCREENSHOT:
 x]` placeholder that the agent forgot to replace with a real recorder
 asset now flags the manual as incomplete instead of silently passing.
+
+v0.4.0 — added the 8th check: "screenshot unique" (opt-in via
+ --unique). The recorder does not require an intervening
+ click/type/wait_for between two screenshot steps, so an LLM agent
+ can produce two byte-identical PNGs under different filenames
+ (e.g. dashboard-home.png and module-map.png both showing the
+ same dashboard). v0.4.0 reads the SHA256 of every referenced
+ PNG and flags any hash referenced by 2+ distinct filenames.
+ Default OFF to avoid breaking manuals that intentionally reuse
+ a logo/branding image. The new check also accepts
+ --unique-allow <basename,...> to whitelist shared assets.
 """
 import json
 import re
@@ -194,6 +206,62 @@ def _check_screenshot_files_exist(md_path: Path, text: str) -> dict:
     }
 
 
+def _check_screenshot_unique(
+    md_path: Path, text: str, allow_paths: set | None = None
+) -> dict:
+    """v0.4.0: SHA256 every referenced PNG; flag any hash that 2+
+    distinct filenames share. See docstring v0.4.0 for rationale.
+    """
+    image_paths = _extract_image_paths(text)
+    md_dir = md_path.parent
+    allow_paths = allow_paths or set()
+    by_hash: dict = {}
+    for ref in image_paths:
+        target = (md_dir / ref).resolve()
+        if not target.exists() or not target.is_file():
+            continue
+        if Path(ref).name in allow_paths:
+            continue
+        try:
+            h = _sha256_file(target)
+        except OSError:
+            continue
+        by_hash.setdefault(h, []).append((Path(ref).name, str(ref)))
+    duplicates: list = []
+    for h, refs in by_hash.items():
+        unique_names = sorted({name for name, _ in refs})
+        if len(unique_names) < 2:
+            continue
+        duplicates.append({
+            "sha256": h,
+            "files": unique_names,
+            "occurrences": len(refs),
+        })
+    duplicates.sort(key=lambda d: d["sha256"])
+    total = len(by_hash)
+    dup_count = len(duplicates)
+    return {
+        "name": "screenshot unique (no duplicate content)",
+        "hits": total - dup_count,
+        "threshold": total,
+        "comparison": "ge",
+        "ok": (dup_count == 0),
+        "unique_hashes": total,
+        "duplicate_count": dup_count,
+        "duplicates": duplicates[:5],
+    }
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+
 # Each check: (name, regex, threshold, comparison, exclude_code?)
 # comparison is 'ge' (>=) or 'le' (<=).
 CHECKS = [
@@ -291,6 +359,23 @@ def validate_file(path):
         "unreplaced_placeholder_count": file_check["unreplaced_placeholder_count"],
     })
     all_ok = all_ok and file_check["ok"]
+    # v0.4.0: opt-in unique-content check. Pop a module-level flag
+    # (set by main from --unique) so test harnesses can override.
+    if globals().get("UNIQUE_CHECK_ENABLED"):
+        unique_check = _check_screenshot_unique(
+            path, text, allow_paths=globals().get("UNIQUE_CHECK_ALLOW", set())
+        )
+        results.append({
+            "name": unique_check["name"],
+            "hits": unique_check["hits"],
+            "threshold": unique_check["threshold"],
+            "comparison": unique_check["comparison"],
+            "ok": unique_check["ok"],
+            "unique_hashes": unique_check["unique_hashes"],
+            "duplicate_count": unique_check["duplicate_count"],
+            "duplicates": unique_check["duplicates"],
+        })
+        all_ok = all_ok and unique_check["ok"]
     return {"file": str(path), "ok": all_ok, "checks": results}
 
 
@@ -319,6 +404,23 @@ def render_human(results):
                         c["name"], c["hits"], c["threshold"], breakdown_str
                     )
                 )
+            elif c["name"] == "screenshot unique (no duplicate content)":
+                # v0.4.0: surface the duplicate groups so the user
+                # sees WHICH PNGs are byte-identical (and to which
+                # siblings). Up to 5 groups × ≤ 5 filenames each.
+                dups = c.get("duplicates", [])
+                if dups:
+                    groups = "; ".join(
+                        "{" + ", ".join(g["files"]) + "}"
+                        for g in dups
+                    )
+                else:
+                    groups = "0 issues"
+                parts.append(
+                    "{}={}/{} ({})".format(
+                        c["name"], c["hits"], c["threshold"], groups
+                    )
+                )
             else:
                 parts.append("{}={}".format(c["name"], c["hits"]))
         lines.append("[{}] {}: {}".format(status, r["file"], ", ".join(parts)))
@@ -335,6 +437,18 @@ def render_human(results):
                             ", ".join(c.get("missing_paths", [])) or "(no examples)",
                         )
                     )
+                elif c["name"] == "screenshot unique (no duplicate content)":
+                    dups = c.get("duplicates", [])
+                    rendered = "; ".join(
+                        "{" + ", ".join(g["files"]) + "}"
+                        for g in dups
+                    ) or "(no groups)"
+                    lines.append(
+                        "        - {}: {}/{} ({} duplicate group(s); e.g. {})".format(
+                            c["name"], c["hits"], c["threshold"],
+                            c.get("duplicate_count", 0), rendered,
+                        )
+                    )
                 else:
                     lines.append(
                         "        - {}: {} (need {} {})".format(
@@ -348,7 +462,19 @@ def main(argv):
     args = list(argv)
     strict = "--strict" in args
     as_json = "--json" in args
+    unique = "--unique" in args
+    # --unique-allow logo.png,branding.png -> whitelist
+    unique_allow: set = set()
+    for a in list(args):
+        if a.startswith("--unique-allow="):
+            unique_allow = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
+            args.remove(a)
+        elif a == "--unique-allow":
+            args.remove(a)
     args = [a for a in args if not a.startswith("--")]
+    # Stash on module globals so validate_file can pick up.
+    globals()["UNIQUE_CHECK_ENABLED"] = unique
+    globals()["UNIQUE_CHECK_ALLOW"] = unique_allow
     if not args:
         print(__doc__.strip())
         return 0
