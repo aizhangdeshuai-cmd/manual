@@ -11,6 +11,12 @@ __pycache__/
 .vscode/
 .env
 .env.local
+# pip / build artifacts
+*.egg-info/
+*.egg
+build/
+dist/
+
 # recorder plugin
 recorder/.recorder_state.json
 recorder/tests/fixtures/static_site/uploads/
