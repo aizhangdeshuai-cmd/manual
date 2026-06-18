@@ -1,4 +1,79 @@
+## 0.3.2 (2026-06-18) — video narration (TTS voiceover)
+
+### Headline feature: TTS + ffmpeg mux on `video_stop`
+
+A `video_stop` step that carries a `narration` field (list of strings, one per
+recorded sub-step) now produces a video with synchronized Chinese / English
+voiceover. Powered by `edge-tts` (Microsoft Edge online, 0 API key) and
+`ffmpeg` (already required for video concat).
+
+### New files
+
+- `recorder_plugin/tts.py` — edge-tts wrapper with retry + concurrency limits
+- `recorder_plugin/tts_voices.py` — curated voice presets (zh-CN, zh-HK, zh-TW, en-US)
+- `recorder_plugin/mux_audio.py` — narration concat + stream_loop mux
+- `recorder_plugin/cli_narration.py` — 3 new CLI subcommands
+- `tests/unit/test_narration.py` — 19 unit tests
+
+### New dependencies
+
+- `edge-tts >= 6.1, < 8.0` (recorder-only, per CONTRIBUTING.md opt-in exemption)
+
+### What we deliberately did NOT add
+
+- BGM selection (Pixelle-Video has it; business manuals don't need it)
+- 数字人口播 (out of scope for internal user manuals)
+- ComfyUI / RunningHub / external TTS providers (one engine, one config)
+- viewer template changes (HTML5 `<video controls>` plays mp4 with audio natively)
+
+### Known limitation: stream_loop + -shortest is broken
+
+`-stream_loop -1` combined with `-shortest` produces unpredictable output
+durations (e.g. 10s for an 8s-audio / 5s-video pair). We dropped `-shortest`
+in favor of `-t <audio_dur>`, which converges both cases to exactly the
+audio duration. See `mux_audio.mux_narration_with_video` for the test that
+caught this (test_mux_audio_longer_loops_video_to_audio).
+
 # Changelog
+
+
+### Hotfix (same day): `tts.synthesize` async-loop bug
+
+The initial 0.3.2 `synthesize()` returned a non-awaited `asyncio.Task` when
+called from inside a running event loop. Symptom: `FileNotFoundError` on
+narration segments, swallowed by `_apply_narration`'s `try/except`, surfaced
+only as a stderr warning. End-to-end testing with a real Playwright run
+caught this immediately.
+
+**Fix**:
+- `tts.synthesize` now raises `RuntimeError` if called from a running loop,
+  with the message pointing the user to `await tts.asynthesize(...)`.
+- `tts.asynthesize` (new async API) is what recorder uses internally.
+- `tts.new_semaphore(value=N)` for cross-call concurrency control.
+- 4 new tests in `test_narration.py::TestTTSAsync` cover the regression.
+
+End-to-end verified: real recording + narration field → mp4 with H264 + AAC
+voiceover, all expected metadata (`narration_segments/voice/gap/seconds`)
+populated, silent backup preserved, stderr clean.
+
+
+
+### Hotfix (round 2): `tts.is_available()` must not raise on missing dep
+
+`is_available()` is the cheap probe used by `check-recording-readiness` to
+decide whether TTS is available before attempting a recording run. The
+initial implementation caught only `TTSError`; on a system without
+edge-tts, the lazy import raises plain `ImportError`, which escaped as an
+unhandled exception and broke the readiness banner.
+
+**Fix**: catch both `TTSError` and `ImportError`, return `False` in both
+cases. Added regression test `TestTTSAsync.test_is_available_returns_false_on_missing_dep`.
+
+Discovered during audit round 3 (real e2e) when verifying graceful
+degradation paths. No production data was affected (the recorder's
+`try/except` in `_apply_narration` already swallowed the failure and
+kept the silent video), but the probe contract is now correct.
+
 
 ## 0.3.0 (2026-06-12)
 

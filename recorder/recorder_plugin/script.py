@@ -285,6 +285,99 @@ async def _handle_video_stop(
     return asset
 
 
+async def _apply_narration(
+    asset: AssetRef, narration_segs: list, step: dict, output_dir: Path
+) -> AssetRef:
+    """v0.3.2: synthesize narration segments and mux them onto a recorded video.
+
+    narration_segs: list of strings, one per task-card step.
+    step.narration_gap: optional float, seconds of silence between segments
+        (default 2.0). step.narration_voice / step.narration_rate override
+        the global defaults for this video.
+
+    Returns a NEW AssetRef whose .path is the muxed mp4 (the original silent
+    mp4 is moved to a `.silent.mp4` sibling for archival). If TTS is not
+    available (edge-tts not installed) we raise so the caller can warn-and-
+    fallback; we do NOT auto-fall back to silent here, because callers
+    almost always want to know whether narration actually worked.
+    """
+    from recorder_plugin import tts as tts_mod
+    from recorder_plugin import mux_audio
+    from recorder_plugin.core import AssetRef as _AR  # local re-import for typing
+
+    if not tts_mod.is_available():
+        raise tts_mod.TTSError(
+            "edge-tts is not installed; skipping narration. "
+            "Run: pip install edge-tts"
+        )
+
+    voice = step.get("narration_voice") or tts_mod.get_default_voice()
+    rate = step.get("narration_rate") or tts_mod.get_default_rate()
+    gap = float(step.get("narration_gap", 2.0))
+
+    # 1) Synthesize each segment to a temp file.
+    # v0.3.2 (round 3): use the ASYNC `asynthesize` here. The previous sync
+    # `synthesize` was called from inside this async function and the
+    # `loop.create_task` branch returned a Task that the caller never awaited,
+    # so the mp3 files were never written before concat_segments_with_gaps
+    # tried to read them — FileNotFoundError was raised and silently swallowed.
+    seg_dir = output_dir / "_narration_segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+    seg_paths: list[Path] = []
+    # Share one semaphore across all N segments so we don't hammer edge-tts.
+    sem = tts_mod.new_semaphore()
+    for idx, text in enumerate(narration_segs):
+        if not text or not str(text).strip():
+            continue  # silently skip empty steps (they'd be empty audio)
+        seg_path = seg_dir / f"{asset.path.stem}.seg{idx:02d}.mp3"
+        await tts_mod.asynthesize(
+            str(text), seg_path, voice=voice, rate=rate, semaphore=sem
+        )
+        seg_paths.append(seg_path)
+    if not seg_paths:
+        raise tts_mod.TTSError("all narration segments were empty")
+
+    # 2) Concat with gaps → full narration
+    narr_path = output_dir / f"{asset.path.stem}.narration.mp3"
+    if len(seg_paths) == 1:
+        # Single segment: skip gap concat to avoid ffmpeg round-trip
+        narr_path.write_bytes(seg_paths[0].read_bytes())
+    else:
+        mux_audio.concat_segments_with_gaps(seg_paths, narr_path, gap_seconds=gap)
+
+    # 3) Mux narration onto the (silent) video
+    out_mp4 = asset.path  # overwrite in place
+    silent_backup = asset.path.with_suffix(".silent.mp4")
+    try:
+        asset.path.rename(silent_backup)
+    except FileNotFoundError:
+        silent_backup = None
+    mux_audio.mux_narration_with_video(
+        silent_backup if silent_backup else asset.path,
+        narr_path,
+        out_mp4,
+    )
+
+    # Return a fresh AssetRef pointing at the muxed file
+    new_ref = _AR(
+        path=out_mp4,
+        kind=asset.kind,
+        size_bytes=out_mp4.stat().st_size,
+        slice_index=asset.slice_index,
+    )
+    # Stash narration metadata for the script-level output dict
+    new_ref.extra = dict(asset.extra or {})
+    new_ref.extra["narration_segments"] = len(seg_paths)
+    new_ref.extra["narration_gap_s"] = gap
+    new_ref.extra["narration_voice"] = voice
+    new_ref.extra["narration_seconds"] = sum(
+        # rough estimate: each segment's file size / (24kHz * 1ch * 1byte ≈ 24kB/s)
+        # not exact, but the agent can re-ffprobe if it needs the truth.
+        p.stat().st_size / 24000.0 for p in seg_paths
+    )
+    return new_ref
+
+
 async def run_script(script_path: Path) -> dict:
     """Execute a declarative JSON script. Returns the output dict (per spec §6.2)."""
     script_path = Path(script_path)
@@ -401,6 +494,21 @@ async def run_script(script_path: Path) -> dict:
                         })
                         continue
                     asset = await _handle_video_stop(rec, step, name_to_path, output_dir)
+                    # v0.3.2: optional narration. If the video_stop step carries
+                    # `narration` (a list of strings, one per step), synthesize each
+                    # segment, concatenate with gaps, then mux onto the recorded
+                    # video. Failures are non-fatal (warn, keep the silent video)
+                    # because TTS is opt-in and the user may be offline.
+                    narration_segs = step.get("narration")
+                    if narration_segs and isinstance(narration_segs, list) and narration_segs:
+                        try:
+                            asset = await _apply_narration(asset, narration_segs, step, output_dir)
+                        except Exception as e:
+                            print(
+                                f"WARNING: narration failed for video '{name}' "
+                                f"({type(e).__name__}: {e}); keeping silent video.",
+                                file=sys.stderr,
+                            )
                     asset_dict = asset.to_dict()
                     asset_dict["step"] = i
                     asset_dict["name"] = name

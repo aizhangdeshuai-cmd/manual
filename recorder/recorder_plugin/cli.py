@@ -12,6 +12,9 @@ def _usage() -> None:
     print("Usage:")
     print("  python3 -m recorder_plugin.cli run <script.json>")
     print("  python3 -m recorder_plugin.cli apply-ai-responses <output-dir>")
+    print("  python3 -m recorder_plugin.cli tts-synth <text> --out PATH [--voice V] [--rate R]")
+    print("  python3 -m recorder_plugin.cli concat-narration <seg1> <seg2> [...] --out PATH [--gap S]")
+    print("  python3 -m recorder_plugin.cli mux-audio <video> <audio> --out PATH")
     print("  python3 -m recorder_plugin.cli --version")
     print("  python3 -m recorder_plugin.cli --help")
 
@@ -63,6 +66,12 @@ def main(argv: list[str]) -> int:
         if skipped:
             return 1
         return 0
+    # v0.3.2: narration subcommands (TTS + audio mux)
+    if argv[1] in ("tts-synth", "concat-narration", "mux-audio"):
+        from recorder_plugin.cli_narration import SUBCOMMANDS
+        handler = SUBCOMMANDS[argv[1]]
+        return handler(argv[2:])
+
     print(f"unknown subcommand: {argv[1]}", file=sys.stderr)
     _usage()
     return 2

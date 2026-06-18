@@ -4,6 +4,96 @@ Top-level changelog for the user-manual skill. The recorder opt-in
 plugin (`recorder/`) has its own changelog at `recorder/CHANGELOG.md` —
 versioned in lockstep with the main skill.
 
+## 0.3.2 (2026-06-18) — video narration (TTS voiceover)
+
+### Hotfix: `tts.synthesize` now refuses to be called from a running event loop
+
+v0.3.2 initial release had a silent bug: `synthesize()` inside a running loop
+returned a non-awaited `asyncio.Task` (fire-and-forget), so the mp3 files
+were never on disk when downstream code tried to read them. The error was
+swallowed by `try/except` in `script._apply_narration` and surfaced as a
+"WARNING: narration failed for video 'demo-flow' (FileNotFoundError: ...)"
+on stderr — silent enough to miss in casual review.
+
+**Fix** (recorder commit, same release):
+- `tts.synthesize` is now strict: raises `RuntimeError` loudly if called from
+  inside a running loop, with hint to use `await tts.asynthesize(...)` instead.
+- `tts.asynthesize` (new) is the async API that recorder uses internally.
+- `tts.new_semaphore(value=N)` returns a fresh `asyncio.Semaphore` for callers
+  that want cross-call concurrency control.
+
+**New tests** (regression coverage for the bug):
+- `TestTTSAsync.test_asynthesize_writes_mp3` — happy path of async API
+- `TestTTSAsync.test_synthesize_from_running_loop_raises` — guards the bug
+- `TestTTSAsync.test_synthesize_outside_loop_still_works` — sync API preserved
+- `TestTTSAsync.test_new_semaphore_returns_usable_semaphore` — semaphore usable
+
+End-to-end pipeline now verified: real Playwright recording + `narration`
+field → mp4 with H264 + AAC voiceover, narration_seconds=3 segments,
+narration_gap_s=1.5, silent backup preserved, stderr empty.
+
+
+### recorder 插件:edge-tts + ffmpeg mux
+
+The recorder can now add **Chinese / English voiceover** to a recorded video
+automatically. Add a `narration` list to your `video_stop` step:
+
+```json
+{"action": "video_stop", "name": "create-employee",
+ "narration": ["打开系统管理。", "点击新增用户。", "点击保存。"]}
+```
+
+The recorder synthesizes each segment with `edge-tts` (Microsoft Edge online
+TTS, no API key, no auth), concatenates them with configurable silence gaps
+(default 2.0s), then muxes the audio onto the recorded video with ffmpeg. The
+output is one mp4 with synchronized voiceover.
+
+**Failure modes (designed, not accidental):**
+- `edge-tts` not installed → recorder logs warning, keeps silent video
+- Network down / Edge TTS rate-limited → retries 5x with exponential backoff
+- Recording longer than narration → video tail trimmed (`-t audio_dur`)
+- Recording shorter than narration → video looped (`-stream_loop -1`)
+
+**New CLI subcommands** (also available standalone):
+- `python3 -m recorder_plugin.cli tts-synth <text> --out PATH`
+- `python3 -m recorder_plugin.cli concat-narration <seg1> <seg2> [...] --out PATH`
+- `python3 -m recorder_plugin.cli mux-audio <video> <audio> --out PATH`
+
+**SKILL.md changes:**
+- §2.6.1 new: "操作旁白(narration)" — field reference + 完整示例
+- §4 task card template: optional 9th field `narration` documented
+- §7 helper table: 3 new recorder subcommands
+
+**New dependencies** (recorder-only, per CONTRIBUTING.md opt-in exemption):
+- `edge-tts >= 6.1, < 8.0` (rany2, 11k+ stars, MIT, no API key)
+
+**New tests:** `tests/unit/test_narration.py` — 19 cases covering TTS synthesize,
+voice override, silence gap generation, concat with/without gaps, mux with
+audio-longer/audio-shorter, error paths, CLI subcommand dispatch.
+
+**Lessons learned** (v0.3.2 round 2):
+- `-stream_loop -1 + -shortest` produces unpredictable durations (10s+ for 8s/5s pair).
+  Fix: drop `-shortest`, use `-t <audio_dur>` explicitly. Both "long" and "short"
+  audio cases converge to exactly `audio_dur` output.
+
+
+### Hotfix (round 2): `tts.is_available()` must not raise on missing dep
+
+`is_available()` is the cheap probe used by `check-recording-readiness` to
+decide whether TTS is available before attempting a recording run. The
+initial implementation caught only `TTSError`; on a system without
+edge-tts, the lazy import raises plain `ImportError`, which escaped as an
+unhandled exception and broke the readiness banner.
+
+**Fix**: catch both `TTSError` and `ImportError`, return `False` in both
+cases. Added regression test `TestTTSAsync.test_is_available_returns_false_on_missing_dep`.
+
+Discovered during audit round 3 (real e2e) when verifying graceful
+degradation paths. No production data was affected (the recorder's
+`try/except` in `_apply_narration` already swallowed the failure and
+kept the silent video), but the probe contract is now correct.
+
+
 ## 0.3.1 (2026-06-13) — validate-output stops lying + §14 early-fail
 
 ### validate-output 真查文件存在

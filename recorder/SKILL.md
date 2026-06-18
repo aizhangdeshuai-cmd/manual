@@ -67,6 +67,59 @@ See `examples/sample_script.json` for a complete example. The 10 step actions:
 
 The `video_stop` step produces a single MP4 (concat of N 10s webm slices) via `video.concat_slices_to_mp4`. State-tracked across re-runs: a script with the same name will skip the video session if it was already validated.
 
+### Narration (v0.3.2 — TTS voiceover for video_stop)
+
+When a `video_stop` step carries a `narration` field (a list of strings, one per
+recorded sub-step), the recorder synthesizes each segment with edge-tts, concatenates
+them with silence gaps, and muxes the resulting audio track onto the recorded video.
+The output mp4 plays the recording with synchronized voiceover.
+
+Script shape:
+
+```json
+{
+  "name": "create-employee-flow",
+  "steps": [
+    {"action": "video_start", "name": "create-employee"},
+    {"action": "click", "name": "open-user-mgmt", "selector": "..."},
+    {"action": "click", "name": "add-user-btn",   "selector": "..."},
+    {"action": "type", "name": "fill-employee-id", "selector": "..."},
+    {"action": "video_stop", "name": "create-employee",
+     "narration": [
+       "打开系统管理菜单,进入用户管理页面。",
+       "点击右上角新增用户按钮。",
+       "填写工号、姓名、手机号。",
+       "点击保存,列表里出现新员工。"
+     ],
+     "narration_gap": 2.0,
+     "narration_voice": "zh-CN-XiaoxiaoNeural",
+     "narration_rate": "+0%"
+    }
+  ]
+}
+```
+
+The original silent video is kept as `<name>.silent.mp4` next to the new
+`<name>.mp4` (with audio). Narration is opt-in: if the `narration` field is
+absent, video_stop behaves exactly as before (silent output).
+
+If `edge-tts` is not installed or the network is unavailable, the recorder logs a
+warning to stderr and keeps the silent video — it does NOT fail the run. This
+mirrors the v0.2.4 philosophy: optional capabilities degrade, they don't break.
+
+CLI subcommands for direct use (no script needed):
+
+```bash
+# Synthesize one narration segment
+python3 -m recorder_plugin.cli tts-synth "打开系统管理。" --out nar1.mp3
+
+# Concatenate segments with 2s silence gaps
+python3 -m recorder_plugin.cli concat-narration nar1.mp3 nar2.mp3 --out full.mp3 --gap 2.0
+
+# Mux narration onto a video
+python3 -m recorder_plugin.cli mux-audio recording.webm full.mp3 --out with-voice.mp4
+```
+
 ### `ai_annotate` step (v0.2.4 — agent-mediated, provider-agnostic)
 
 The `ai_annotate` step writes a request file and **does not** call any LLM. The recorder never depends on a specific vision provider.

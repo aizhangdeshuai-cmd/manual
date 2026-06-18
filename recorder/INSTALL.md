@@ -7,7 +7,9 @@ cd recorder
 pip install -e ".[test]"
 ```
 
-This installs: `playwright >= 1.40, < 2.0`, `Pillow >= 10.0`, `mcp >= 1.0`, plus test deps `pytest`, `pytest-asyncio`.
+This installs: `playwright >= 1.40, < 2.0`, `Pillow >= 10.0`, `mcp >= 1.0`, `edge-tts >= 6.1, < 8.0` (for v0.3.2 narration), plus test deps `pytest`, `pytest-asyncio`.
+
+> **v0.3.2 narration requires network access** to the Microsoft Edge TTS service (`api.msedgeservices.com`). The recorder gracefully degrades to a silent video if edge-tts fails — see recorder/SKILL.md "Narration" section. For air-gapped environments, install `piper-tts` and adapt `recorder_plugin/tts.py` to use it as the backend.
 
 ## System binaries
 
