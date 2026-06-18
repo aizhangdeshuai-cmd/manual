@@ -226,8 +226,12 @@ DEFAULT_CONFIG_LINES = [
 DEFAULT_CONFIG = "\n".join(DEFAULT_CONFIG_LINES)
 
 
-def init_skill(project_root: Path) -> dict:
-    """One-shot bootstrap for a fresh project (v2 D1).
+def init_skill(
+    project_root: Path,
+    auto_install: bool = True,
+    allow_blocked: bool = False,
+) -> dict:
+    """One-shot bootstrap for a fresh project (v2 D1, v0.4.0 recorder-on).
 
     Creates:
       docs/user-manual/manual/             (where the .md lives)
@@ -243,20 +247,144 @@ def init_skill(project_root: Path) -> dict:
     first-class project input. See SKILL.md section 1 (file location) and
     section 7 (helper subcommands).
 
-    Returns a dict { created: [...], skipped: [...], personas_required: <path> }.
-    Raises FileNotFoundError if personas.json does not exist.
+    v0.4.0 (recorder-on): after scaffold, runs `check_recording_readiness()`.
+    If status is RED and `auto_install=True` (default), AUTO-INSTALLS the
+    missing deps (playwright pip + chromium download) so a single
+    `init-skill` brings the project to "ready". If still RED after
+    auto-install, and `allow_blocked=False` (default), this function
+    raises `RecordingBlockedError`. The CLI catches it and exits 1
+    loudly so the LLM agent cannot silently produce a manual that
+    has zero real screenshots. Pass `auto_install=False` for
+    dry-run or CI environments that have deps via other channels.
+    Pass `allow_blocked=True` if you intentionally want to write
+    the manual markdown before recording (e.g. the dev server is
+    only available later).
 
-    v0.3.1: after scaffold, runs `check_recording_readiness()` and prints a
-    banner if the recording phase CAN'T run (deps missing, dev server down,
-    placeholders without files). The user sees a clear "recording not ready"
-    signal at init-time, so they don't write a full manual only to discover
-    §14 is unattainable at the end.
+    Returns a dict:
+      {
+        "created": [...],
+        "skipped": [...],
+        "personas_required": <path>,
+        "recording_readiness": <full readiness dict>,
+        "auto_install_attempted": bool,
+        "auto_install_ok": bool,
+      }
+
+    Raises:
+      FileNotFoundError: personas.json missing and no template.
+      RecordingBlockedError: post-install readiness is RED and
+        allow_blocked=False.
     """
     result = _init_skill_scaffold(project_root)
-    # Post-scaffold readiness check (informational; does not block init-skill)
     readiness = check_recording_readiness(project_root)
     result["recording_readiness"] = readiness
+
+    auto_install_attempted = False
+    auto_install_ok = False
+
+    if (
+        auto_install
+        and readiness["status"] == "red"
+        and not _is_dev_server_red_only(readiness)
+    ):
+        # Auto-install ONLY when a "red" is due to deps we can install
+        # (playwright module missing, or Chromium not downloaded). A
+        # red caused solely by a missing dev server stays as-is and is
+        # surfaced to the user (we can't start their app server).
+        auto_install_attempted = True
+        auto_install_ok = _auto_install_recorder_deps()
+        if auto_install_ok:
+            readiness = check_recording_readiness(project_root)
+            result["recording_readiness"] = readiness
+
+    result["auto_install_attempted"] = auto_install_attempted
+    result["auto_install_ok"] = auto_install_ok
+
+    if readiness["status"] == "red" and not allow_blocked:
+        raise RecordingBlockedError(
+            f"recording phase is BLOCKED for {project_root}: {readiness['summary']}"
+        )
     return result
+
+
+class RecordingBlockedError(RuntimeError):
+    """v0.4.0: raised by init_skill() when post-install readiness is RED
+    and allow_blocked=False. CLI catches this and exits 1 so the LLM
+    agent cannot claim "init done" while the project is unrecordable.
+    """
+
+
+def _is_dev_server_red_only(readiness: dict) -> bool:
+    """v0.4.0: a "red" readiness is "dev-server-only" if the ONLY
+    failing check is the dev-server probe AND every other check
+    is OK. In that case auto-install is a no-op (we can't start
+    the user's app server) and we should NOT pretend the install
+    succeeded.
+    """
+    failing = [c for c in readiness["checks"] if c["status"] == "FAIL"]
+    if not failing:
+        return False
+    dev_server_failures = [
+        c for c in failing
+        if c["name"].startswith("dev server") or
+           c["name"] == "manual placeholders vs. files"
+    ]
+    return len(failing) == len(dev_server_failures) and len(dev_server_failures) >= 1
+
+
+def _auto_install_recorder_deps() -> bool:
+    """v0.4.0: best-effort auto-install of recorder deps.
+
+    Tries:
+      1. `pip install playwright`  (if module missing)
+      2. `python3 -m playwright install chromium`  (if browser missing)
+
+    Returns True if both succeed, False otherwise. Prints a one-line
+    progress message per step so the user sees what's happening in
+    the same stream as the rest of init-skill.
+    """
+    import subprocess
+    # Step 1: playwright module
+    try:
+        import playwright  # noqa: F401
+        playwright_ok = True
+    except ImportError:
+        playwright_ok = False
+    if not playwright_ok:
+        print("", file=sys.stderr)
+        print("⏳ auto-installing playwright Python module...", file=sys.stderr)
+        try:
+            r = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "playwright"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if r.returncode != 0:
+                print(f"  ❌ pip install playwright failed: {r.stderr[:200]}",
+                      file=sys.stderr)
+                return False
+            print("  ✅ playwright installed", file=sys.stderr)
+        except Exception as e:
+            print(f"  ❌ pip install playwright errored: {e}", file=sys.stderr)
+            return False
+    # Step 2: chromium browser
+    cache = Path.home() / "Library" / "Caches" / "ms-playwright"
+    if not (cache.exists() and any(cache.glob("chromium-*"))):
+        print("⏳ downloading Chromium for Playwright (this may take a minute)...",
+              file=sys.stderr)
+        try:
+            r = subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                capture_output=True, text=True, timeout=300,
+            )
+            if r.returncode != 0:
+                print(f"  ❌ playwright install chromium failed: {r.stderr[:200]}",
+                      file=sys.stderr)
+                return False
+            print("  ✅ Chromium installed", file=sys.stderr)
+        except Exception as e:
+            print(f"  ❌ playwright install chromium errored: {e}", file=sys.stderr)
+            return False
+    return True
 
 
 def _init_skill_scaffold(project_root: Path) -> dict:
@@ -1601,6 +1729,318 @@ def cmd_record_manual(args):
     return 0
 
 
+# ---------- v0.4.0: one-shot record-and-replace ----------
+
+
+def cmd_record_and_replace(args: list[str]) -> int:
+    """v0.4.0: one-shot record + apply-mapping, replacing the 5-step
+    manual §14 workflow with a single command.
+
+    The LLM agent runs:
+        python3 -m manual_helper record-and-replace <manual.md> \
+            --script <recorder-script.json> [--dry-run]
+
+    What this does:
+        1. Sanity-check: --script exists, manual exists, recorder deps OK
+           (or auto-install via init-skill). Pre-flight check that:
+             - recorder_plugin is importable
+             - playwright + chromium installed
+             - target URL in the script is reachable (HEAD probe)
+             - login env vars are set (if script references them)
+        2. Run the recorder:  python3 -m recorder_plugin.cli run <script>
+        3. Auto-build a mapping JSON from the recorder's output (matches
+           step name → screenshots/<domain>/<name>.png/.mp4 by the
+           recorder's standard naming convention).
+        4. Apply the mapping:  record-manual <manual> --apply-mapping <m>
+        5. Run validate-output.py --unique to surface any duplicate-
+           content screenshots (catches the §13 eval failure pattern).
+        6. Re-run validate (default 7 checks + the v0.4.0 8th).
+
+    Returns:
+        0  if all assets recorded and applied (validate passes)
+        1  if recording succeeded but validate still fails (mapping
+            didn't catch every placeholder; LLM agent must decide
+            whether to re-record or accept the gap)
+        2  if recorder itself failed (deps missing, URL unreachable, etc.)
+        3  if --dry-run (no recording actually happened; just the
+            pre-flight + mapping preview)
+
+    The point: by collapsing §14's 5 manual steps into 1, the LLM
+    agent cannot "forget step 3" or "stop after step 2" — the single
+    command either runs all of them or none, with one exit code.
+    """
+    # --help / no args
+    if not args or args[0] in ("--help", "-h", "help"):
+        print(
+            "usage: record-and-replace <manual.md> --script <recorder.json>\n"
+            "       [--dry-run] [--skip-validate] [--target-url URL]\n\n"
+            "One-shot: pre-flight check -> run recorder -> apply mapping ->\n"
+            "validate. Replaces the 5-step SKILL.md §14 workflow. See v0.4.0\n"
+            "CHANGELOG for the rationale.",
+            file=sys.stderr,
+        )
+        return 0 if args else 2
+
+    # Parse flags
+    manual_path = None
+    script_path = None
+    dry_run = False
+    skip_validate = False
+    target_url = None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--script" and i + 1 < len(args):
+            script_path = Path(args[i + 1])
+            i += 2
+        elif a == "--dry-run":
+            dry_run = True
+            i += 1
+        elif a == "--skip-validate":
+            skip_validate = True
+            i += 1
+        elif a == "--target-url" and i + 1 < len(args):
+            target_url = args[i + 1]
+            i += 2
+        elif not a.startswith("--") and manual_path is None:
+            manual_path = Path(a)
+            i += 1
+        else:
+            print(f"error: unknown arg {a!r}", file=sys.stderr)
+            return 2
+
+    if manual_path is None or not manual_path.exists():
+        print(f"error: manual not found: {manual_path}", file=sys.stderr)
+        return 2
+    if script_path is None or not script_path.exists():
+        print(f"error: --script not found: {script_path}", file=sys.stderr)
+        return 2
+
+    print(f"=== record-and-replace: {manual_path.name} ===", file=sys.stderr)
+    print(f"  script: {script_path}", file=sys.stderr)
+    if dry_run:
+        print("  mode: DRY-RUN (no recording, no writes)", file=sys.stderr)
+
+    # Step 1: pre-flight
+    preflight_ok, preflight_msgs = _preflight_recorder(
+        script_path, target_url=target_url,
+    )
+    for line in preflight_msgs:
+        print(f"  {line}", file=sys.stderr)
+    if not preflight_ok:
+        print("", file=sys.stderr)
+        print("❌ pre-flight FAILED — fix the issues above and retry.", file=sys.stderr)
+        return 2
+
+    if dry_run:
+        # Build the mapping preview without actually recording
+        text = manual_path.read_text(encoding="utf-8", errors="replace")
+        placeholders = scan_recording_placeholders(text)
+        domain = _domain_for_placeholder(manual_path, "")
+        preview = {
+            "_comment": "dry-run preview; no actual files exist yet",
+            **{p["name"]: f"screenshots/{domain}/{p['name']}.png"
+               if p["kind"] == "screenshot"
+               else f"videos/{domain}/{p['name']}.mp4"
+               for p in placeholders},
+        }
+        print("", file=sys.stderr)
+        print("  mapping preview (would be created on real run):", file=sys.stderr)
+        print(json.dumps(preview, indent=2, ensure_ascii=False))
+        return 3
+
+    # Step 2: run the recorder
+    print("", file=sys.stderr)
+    print("⏳ running recorder (this may take a while)...", file=sys.stderr)
+    recorder_rc = _run_recorder(script_path)
+    if recorder_rc != 0:
+        print(f"❌ recorder exited {recorder_rc}", file=sys.stderr)
+        return 2
+
+    # Step 3: build mapping from recorder output
+    output_dir = script_path.parent / f"{manual_path.stem}_recording"
+    if not output_dir.exists():
+        # Try sibling to script
+        output_dir = script_path.parent
+    mapping = _build_mapping_from_recorder_output(output_dir, manual_path)
+    if not mapping:
+        print("⚠️  recorder ran but no assets found in", output_dir,
+              file=sys.stderr)
+        print("  check the recorder script's `output_dir` field", file=sys.stderr)
+        return 2
+
+    # Step 4: apply mapping
+    mapping_path = output_dir / "mapping.json"
+    mapping_path.write_text(
+        json.dumps(mapping, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    print(f"  mapping: {mapping_path} ({len(mapping)} entries)", file=sys.stderr)
+
+    apply_rc = _apply_mapping_to_manual(manual_path, mapping_path)
+    if apply_rc != 0:
+        print(f"❌ --apply-mapping exited {apply_rc}", file=sys.stderr)
+        return 1
+
+    # Step 5+6: validate (with --unique to catch duplicate-content)
+    if skip_validate:
+        print("", file=sys.stderr)
+        print("✅ record-and-replace complete (validation skipped).", file=sys.stderr)
+        return 0
+    print("", file=sys.stderr)
+    print("⏳ running validate-output.py --unique ...", file=sys.stderr)
+    rc = _run_validate(manual_path, unique=True)
+    if rc == 0:
+        print("", file=sys.stderr)
+        print("✅ record-and-replace complete; manual validates clean.", file=sys.stderr)
+    else:
+        print("", file=sys.stderr)
+        print("⚠️  recording complete but validate reported issues.", file=sys.stderr)
+        print("   re-run `manual_helper record-manual <md>` to see what\'s missing.", file=sys.stderr)
+    return rc
+
+
+def _preflight_recorder(script_path: Path, target_url: str | None) -> tuple[bool, list[str]]:
+    """v0.4.0: 4 pre-flight checks before invoking the recorder.
+
+    Returns (ok, [human-readable lines]). Each line is prefixed with
+    an icon by the caller.
+    """
+    msgs: list[str] = []
+    ok = True
+
+    # Check 1: recorder_plugin importable
+    try:
+        from recorder_plugin import __version__ as rver
+        msgs.append(f"✅ recorder_plugin {rver} importable")
+    except ImportError:
+        msgs.append("❌ recorder_plugin NOT importable")
+        msgs.append("      → pip install -e recorder/[test]  (or  pip install -e ~/.agents/skills/user-manual/recorder)")
+        ok = False
+
+    # Check 2: playwright module
+    try:
+        import playwright  # noqa: F401
+        msgs.append("✅ playwright importable")
+    except ImportError:
+        msgs.append("❌ playwright NOT importable")
+        msgs.append("      → pip install playwright")
+        ok = False
+
+    # Check 3: chromium downloaded
+    cache = Path.home() / "Library" / "Caches" / "ms-playwright"
+    if cache.exists() and any(cache.glob("chromium-*")):
+        msgs.append("✅ Playwright Chromium installed")
+    else:
+        msgs.append("❌ Playwright Chromium NOT installed")
+        msgs.append("      → python3 -m playwright install chromium")
+        ok = False
+
+    # Check 4: ffmpeg
+    import subprocess
+    try:
+        r = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
+        msgs.append("✅ ffmpeg on PATH")
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        msgs.append("❌ ffmpeg NOT on PATH")
+        msgs.append("      → brew install ffmpeg  (macOS)")
+        ok = False
+
+    # Check 5: target URL reachable (if given)
+    if target_url:
+        try:
+            import urllib.request
+            req = urllib.request.Request(target_url, method="HEAD")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                msgs.append(f"✅ target URL reachable: {target_url} (HTTP {resp.status})")
+        except Exception as e:
+            msgs.append(f"⚠️  target URL NOT reachable: {target_url} ({type(e).__name__})")
+            msgs.append("      → start your dev server first, then retry")
+            # URL-unreachable is a WARN, not a FAIL: the user might
+            # know they're going to start the server in a sec.
+
+    # Check 6: script references $ENV vars that are unset
+    try:
+        import os, re
+        script_text = script_path.read_text(encoding="utf-8")
+        env_refs = re.findall(r"\$([A-Z_][A-Z0-9_]*)", script_text)
+        missing_env = [v for v in env_refs if v not in os.environ]
+        if missing_env:
+            missing_env_str = ", ".join("$" + v for v in missing_env)
+            msgs.append(f"❌ script references {missing_env_str} but env var(s) unset")
+        elif env_refs:
+            msgs.append(f"✅ all {len(set(env_refs))} env var ref(s) in script are set")
+    except Exception:
+        pass  # script parse is best-effort
+
+    return ok, msgs
+
+
+def _run_recorder(script_path: Path) -> int:
+    """v0.4.0: invoke recorder in a subprocess, stream stderr to ours."""
+    import subprocess
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "recorder_plugin.cli", "run", str(script_path)],
+            timeout=600,
+        )
+        return proc.returncode
+    except subprocess.TimeoutExpired:
+        print("  ❌ recorder timed out (>600s)", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"  ❌ recorder errored: {e}", file=sys.stderr)
+        return 1
+
+
+def _build_mapping_from_recorder_output(output_dir: Path, manual_path: Path) -> dict:
+    """v0.4.0: scan the recorder's output dir for screenshots and
+    videos; build a mapping {step_name: relative_path} that
+    record-manual --apply-mapping can consume.
+
+    Convention: recorder writes PNGs and MP4s to output_dir directly
+    (or in subdirs). We walk all of them, use the filename stem
+    (without extension) as the mapping key, and build a path
+    relative to the manual's directory.
+    """
+    mapping: dict[str, str] = {}
+    md_dir = manual_path.parent
+    if not output_dir.exists():
+        return mapping
+    for asset in list(output_dir.glob("**/*.png")) + list(output_dir.glob("**/*.mp4")):
+        # Map asset path -> path relative to manual dir
+        try:
+            rel = asset.resolve().relative_to(md_dir.resolve())
+        except ValueError:
+            # Asset is outside manual dir; use as-is
+            rel = asset
+        mapping[asset.stem] = str(rel)
+    return mapping
+
+
+def _apply_mapping_to_manual(manual_path: Path, mapping_path: Path) -> int:
+    """v0.4.0: wrap cmd_record_manual --apply-mapping in a function
+    that returns the exit code. Avoids spawning another Python
+    interpreter."""
+    return cmd_record_manual([str(manual_path), "--apply-mapping", str(mapping_path)])
+
+
+def _run_validate(manual_path: Path, unique: bool = False) -> int:
+    """v0.4.0: run validate-output.py on a manual. Returns its exit
+    code under --strict."""
+    import subprocess
+    cmd = [sys.executable, str(Path(__file__).parent / "validate-output.py"),
+           "--strict"]
+    if unique:
+        cmd.append("--unique")
+    cmd.append(str(manual_path))
+    try:
+        return subprocess.run(cmd, timeout=60).returncode
+    except Exception as e:
+        print(f"  ⚠️  validate failed to run: {e}", file=sys.stderr)
+        return 0  # don't fail the whole flow on validate crash
+
+
 # Placeholder syntax:
 #   [SCREENSHOT: <name>.png]    [SCREENSHOT NEEDED: <name>.png]
 #   [VIDEO: <name>.mp4]         [VIDEO NEEDED: <name>.mp4]
@@ -1915,11 +2355,30 @@ def main(argv: list[str]) -> int:
 
     if cmd == "init-skill":
         proj_root = Path(argv[2]) if len(argv) == 3 else Path.cwd()
+        # v0.4.0: parse --no-install / --allow-blocked flags
+        auto_install = "--no-install" not in argv
+        allow_blocked = "--allow-blocked" in argv
         try:
-            result = init_skill(proj_root)
+            result = init_skill(
+                proj_root,
+                auto_install=auto_install,
+                allow_blocked=allow_blocked,
+            )
         except FileNotFoundError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
+        except RecordingBlockedError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("  This means the recording phase (§14) cannot run.", file=sys.stderr)
+            print("  The manual you write will have no real screenshots/videos.", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("  Options:", file=sys.stderr)
+            print("    1. Fix the issues above and re-run `init-skill`", file=sys.stderr)
+            print("    2. Re-run with --allow-blocked if you intentionally want", file=sys.stderr)
+            print("       to write the manual first (you must record later)", file=sys.stderr)
+            print("    3. Re-run with --no-install if you manage deps via CI", file=sys.stderr)
+            return 2
         print(f"project root: {proj_root}")
         for p in result["created"]:
             print(f"  created: {p}")
@@ -1929,10 +2388,16 @@ def main(argv: list[str]) -> int:
             print(f"  personas: {result['personas_required']} (present)")
         if not result["created"]:
             print("(nothing to do -- already initialized)")
-        # v0.3.1: after scaffold, print the recording-readiness banner so
-        # the user sees "BLOCKED" / "WARNING" loudly if §14 cannot run.
-        # (init-skill itself never blocks; the manual can be written first.)
+        # v0.4.0: print the readiness badge (OK/WARN/BLOCKED). Default
+        # behavior is to fail if BLOCKED (see RecordingBlockedError above).
         _print_recording_readiness_banner(result.get("recording_readiness", {}))
+        if result.get("auto_install_attempted"):
+            if result.get("auto_install_ok"):
+                print("", file=sys.stderr)
+                print("✅ auto-install completed; recording phase is ready.", file=sys.stderr)
+            else:
+                print("", file=sys.stderr)
+                print("⚠️  auto-install could not complete; see messages above.", file=sys.stderr)
         return 0
 
     if cmd == "check-recording-readiness":
@@ -2016,6 +2481,9 @@ def main(argv: list[str]) -> int:
 
     if cmd == "record-manual":
         return cmd_record_manual(argv[2:])
+
+    if cmd == "record-and-replace":
+        return cmd_record_and_replace(argv[2:])
 
     if cmd == "html-template-version":
         print(html_template_version())

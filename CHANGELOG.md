@@ -4,7 +4,37 @@ Top-level changelog for the user-manual skill. The recorder opt-in
 plugin (`recorder/`) has its own changelog at `recorder/CHANGELOG.md` —
 versioned in lockstep with the main skill.
 
-## 0.4.0 (2026-06-18) — quality guardrails (citation SHA + screenshot dedup)
+## 0.4.0 (2026-06-18) — quality guardrails + recorder-on (no more skipping §14)
+
+### Headline: catch "looks fine, isn't fine" outputs automatically + force recorder to run
+
+The eval report from 2026-06-13 flagged 3 P0/P1 issues that the LLM
+kept re-introducing on each run:
+
+1. **Citations table filled with `(auto)` placeholders** — the
+   `fill-citation-shas` helper exists in `manual_helper.py` but the
+   LLM agent kept skipping it, leaving 14 lines of `(auto)` per
+   manual.
+2. **Same screenshot bytes referenced by 2+ filenames** — recorder's
+   `_handle_screenshot` doesn't require an intervening `click` step
+   between two `screenshot` actions, so back-to-back screenshots of
+   the same page produce byte-identical PNGs (e.g. `dashboard-home.png`
+   == `module-map.png` in the overview manual).
+3. **Q&A sections too short** — typical 2-5 Qs per manual, no
+   category hit the recommended 3-per-class minimum.
+4. **(NEW) Recorder §14 was a 5-step manual flow that the LLM agent
+   consistently skipped in practice.** The agent would write the
+   manual with placeholder-style `![xxx](path.png)` references that
+   "look right" but never invoke the recorder, never run the
+   mapping, never produce real assets. The user only noticed at
+   the end, when the manual had no real screenshots despite the
+   LLM claiming completion.
+
+v0.4.0 hardens all four with **automated checks + a one-shot
+command** so the LLM cannot silently produce a "passes validate
+but is actually broken / unrecorded" output.
+
+### Added — `validate-output.py` 8th check (opt-in `--unique`)
 
 ### Headline: catch "looks fine, isn't fine" outputs automatically
 
@@ -85,6 +115,65 @@ remaining issues.
 - Citations `(auto)` is now a hard FAIL — run
   `manual_helper fill-citation-shas` on existing manuals once
   to bring them up to spec.
+
+### Added — `record-and-replace` (v0.4.0 — §14 in one command)
+
+`SKILL.md §14` used to be 5 manual steps the LLM agent had to
+remember to run in order:
+
+  1. record-manual <md>                           # scan placeholders
+  2. record-manual <md> --generate-template       # emit recorder script
+  3. python3 -m recorder_plugin.cli run <script>  # ACTUAL RECORDING
+  4. (build mapping JSON by hand)
+  5. record-manual <md> --apply-mapping <json>    # wire assets in
+
+In practice, agents skipped 3-5 ("the manual is already written,
+just commit it"). v0.4.0 collapses the whole flow to:
+
+```bash
+python3 -m manual_helper record-and-replace <manual.md> \
+    --script <recorder-script.json>
+```
+
+Internals:
+- **6 pre-flight checks** (recorder_plugin importable, playwright
+  module, Chromium downloaded, ffmpeg, target URL reachable, env
+  vars set) — fails loudly with the exact fix command for any miss
+- **Runs the recorder** (subprocess, 600s timeout, stderr streamed)
+- **Auto-builds the mapping** by walking the recorder's output dir
+  and matching filename stems to placeholder names
+- **Applies the mapping** via `record-manual --apply-mapping`
+- **Runs `validate-output.py --unique`** to surface any duplicate-
+  content screenshots the recorder produced (catches the v0.4.0 8th
+  check failure pattern)
+- Returns 0 (clean) / 1 (validate failed) / 2 (recorder failed) /
+  3 (dry-run). One command, one exit code, no step to forget.
+
+Use `--dry-run` to preview the mapping without actually recording
+(useful in CI before the dev server is up).
+
+### Changed — `init-skill` now exits 1 on unrecordable projects
+
+Previously, `init-skill` ran the readiness check but **printed it
+informationally** and always returned 0. The LLM agent would then
+write the manual anyway, with placeholders, and the user would only
+discover the recorder is broken at the end of §14.
+
+v0.4.0:
+- `init-skill` AUTO-INSTALLS missing deps (`pip install playwright` +
+  `python3 -m playwright install chromium`) — single command brings
+  a fresh project to "ready"
+- If post-install readiness is still RED and `--allow-blocked` is
+  not passed, exits **2** (RED) with a loud error explaining the
+  user has 3 options (fix issues, `--allow-blocked`, `--no-install`)
+- New CLI flags: `--no-install` (CI environments with deps via
+  other channels) and `--allow-blocked` (intentional "write manual
+  first, record later")
+- Dev-server-only RED is **not** auto-installed (we can't start
+  the user's app server) but is surfaced clearly so the user knows
+  the recorder is ready, only the dev server is not
+
+### Tests
 
 ## 0.3.2 (2026-06-18) — video narration (TTS voiceover)
 

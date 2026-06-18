@@ -726,9 +726,29 @@ When the target project has the `recorder` opt-in plugin installed, assets are p
 
 The recorder produces files matching the `<domain>-<task>-<element>.png` naming convention in §1 above; these files drop directly into task card `[SCREENSHOT: ...]` slots. For video, the recorder emits a list of 10-second slices; the task card references the manifest.
 
-## 14. 录屏阶段 (recording phase) — v0.2.3 新增
+## 14. 录屏阶段 (recording phase) — v0.2.3 新增 / v0.4.0 升级
 
 **This section is mandatory for the LLM agent.** A manual full of `[SCREENSHOT: x]` placeholders is **not** a finished manual — it's a draft. The recording phase fills those placeholders with real assets.
+
+> **v0.4.0 (recorder-on)**: §14 used to be 5 manual steps that the LLM agent
+> had to remember to do in order. In practice, agents skipped steps 3-5
+> (recorder invocation, mapping) and the user got a "finished" manual
+> with no real assets. v0.4.0 collapses §14 to a single command:
+>
+> ```bash
+> python3 -m manual_helper record-and-replace <manual.md> \
+>     --script <recorder-script.json>
+> ```
+>
+> This runs pre-flight checks → invokes the recorder → builds the mapping
+> → applies it to the manual → runs `validate-output.py --unique`. One
+> command, one exit code, no step to forget. Use `--dry-run` to preview
+> the mapping without actually recording.
+>
+> **Pre-condition (v0.4.0)**: `init-skill` now auto-installs the
+> recorder dependencies (`playwright` + Chromium) and exits 1 if the
+> dev server isn't reachable. To write a manual without recording
+> (e.g. dev server is on another host), pass `--allow-blocked`.
 
 ### When this section applies
 
@@ -802,6 +822,8 @@ The LLM agent must ask the user **once** which mode to use, with a default of "r
 | `record-manual <manual.md>` | Scan and report placeholders (`[SCREENSHOT:]`, `[VIDEO:]`, `[AI ANNOTATE:]`). Exits 0 always; never modifies the manual. |
 | `record-manual <manual.md> --generate-template <out.json>` | Same, plus emit a recorder script template the LLM agent fills in. |
 | `record-manual <manual.md> --apply-mapping <mapping.json>` | Replace placeholders with real paths from the mapping. Writes the manual back. Recognizes all 3 placeholder kinds. |
+| `record-and-replace <manual.md> --script <recorder.json>` | **v0.4.0**: one-shot pre-flight + run recorder + build mapping + apply + validate. Replaces the 5-step §14 workflow. Pass `--dry-run` to preview the mapping without recording. |
+| `init-skill [--no-install] [--allow-blocked]` | Bootstrap a fresh project. **v0.4.0**: auto-installs recorder deps (playwright + Chromium) when missing, and exits 1 loudly if recording cannot run (LLM agent cannot claim "init done" on an unrecordable project). Use `--allow-blocked` to write the manual first and record later. |
 
 ## 15. AI 标注阶段 (v0.2.4 — agent-mediated, provider-agnostic)
 
