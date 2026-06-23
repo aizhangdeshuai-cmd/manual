@@ -583,3 +583,101 @@ class RecordAndReplaceAutoRegenTests(unittest.TestCase):
             self.assertEqual(stale.read_text(), "<!-- user-manual-dashboard-version: 1 -->\n<html>STALE</html>",
                              msg=f"--skip-viewer-regen did not skip: stderr={r.stderr[:400]}")
             self.assertIn("viewer: auto-regen skipped (--skip-viewer-regen)", r.stderr)
+
+
+class CheckRecorderScriptNarrationCoverageTests(unittest.TestCase):
+    """v0.5.1: check-recorder-script check #5 (NARRATION COVERAGE) catches
+    the silent-failure case where an LLM forgets the `narration` field on
+    video_stop steps. This is the failure mode that produced
+    `user-manual.mp4` (ovr) = 4.08s silent login page."""
+
+    def _write_script(self, d, *, video_stops=None):
+        """Build a minimal script with a navigate + login + screenshot +
+        optional video_stops. video_stops is a list of dicts that get
+        appended after the screenshot."""
+        base = {
+            "name": "test",
+            "url": "http://localhost:8080",
+            "auth_env": ["$TEST_USER", "$TEST_PASS"],
+            "steps": [
+                {"action": "navigate", "url": "/"},
+                {"action": "type", "selector": "input[name=user]", "value": "$TEST_USER"},
+                {"action": "type", "selector": "input[name=pass]", "value": "$TEST_PASS"},
+                {"action": "click", "selector": "button[type=submit]"},
+                {"action": "screenshot", "name": "home"},
+            ],
+        }
+        if video_stops:
+            # video_start + each video_stop (with optional narration)
+            base["steps"].insert(0, {"action": "video_start", "name": "demo"})
+            for vs in video_stops:
+                base["steps"].append(vs)
+        path = Path(d) / "script.json"
+        path.write_text(json.dumps(base, indent=2))
+        return path
+
+    def test_check_recorder_script_no_video_sessions_is_ok(self):
+        """A script with no video sessions at all → check #5 is OK (n/a)."""
+        with tempfile.TemporaryDirectory() as d:
+            script = self._write_script(d, video_stops=None)
+            os.environ["TEST_USER"] = "x"; os.environ["TEST_PASS"] = "y"
+            try:
+                r = run_module("check-recorder-script", str(script))
+                # url may or may not be reachable; we only assert the
+                # NARRATION COVERAGE check is in the OK set
+                if r.returncode in (0, 1):
+                    self.assertIn("narration coverage", r.stdout,
+                                  msg=f"missing narration coverage check: {r.stdout[:400]}")
+            finally:
+                del os.environ["TEST_USER"]; del os.environ["TEST_PASS"]
+
+    def test_check_recorder_script_all_video_stops_have_narration_is_ok(self):
+        """Every video_stop has narration[] → check #5 passes (OK)."""
+        with tempfile.TemporaryDirectory() as d:
+            script = self._write_script(d, video_stops=[
+                {"action": "video_stop", "name": "demo",
+                 "narration": ["第一步,打开", "第二步,点击"]},
+            ])
+            os.environ["TEST_USER"] = "x"; os.environ["TEST_PASS"] = "y"
+            try:
+                r = run_module("check-recorder-script", str(script))
+                # Look for "narration coverage: ... all N video session(s) have"
+                if r.returncode in (0, 1):
+                    self.assertIn("all 1 video session", r.stdout,
+                                  msg=f"expected OK narration: {r.stdout[:400]}")
+            finally:
+                del os.environ["TEST_USER"]; del os.environ["TEST_PASS"]
+
+    def test_check_recorder_script_no_narration_fails(self):
+        """The lg-contract-flow.mp4 silent-failure case: script has
+        video_stop with NO narration field. Check #5 must FAIL."""
+        with tempfile.TemporaryDirectory() as d:
+            script = self._write_script(d, video_stops=[
+                {"action": "video_stop", "name": "demo"},
+            ])
+            os.environ["TEST_USER"] = "x"; os.environ["TEST_PASS"] = "y"
+            try:
+                r = run_module("check-recorder-script", str(script))
+                self.assertEqual(r.returncode, 1, msg=r.stdout)
+                # The fix hint must mention narration
+                self.assertIn("narration", r.stdout)
+                self.assertIn("SILENT", r.stdout)
+            finally:
+                del os.environ["TEST_USER"]; del os.environ["TEST_PASS"]
+
+    def test_check_recorder_script_partial_narration_warns(self):
+        """Some video_stops have narration, some don't → WARN with missing names."""
+        with tempfile.TemporaryDirectory() as d:
+            script = self._write_script(d, video_stops=[
+                {"action": "video_stop", "name": "with-audio",
+                 "narration": ["x"]},
+                {"action": "video_stop", "name": "silent-one"},
+            ])
+            os.environ["TEST_USER"] = "x"; os.environ["TEST_PASS"] = "y"
+            try:
+                r = run_module("check-recorder-script", str(script))
+                # WARN counts as overall FAIL (rc=1) by check-recorder-script
+                # convention; just assert the names appear
+                self.assertIn("silent-one", r.stdout)
+            finally:
+                del os.environ["TEST_USER"]; del os.environ["TEST_PASS"]

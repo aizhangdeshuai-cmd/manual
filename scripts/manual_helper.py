@@ -1907,6 +1907,55 @@ def cmd_check_recorder_script(args: list[str]) -> int:
             "fix": None,
         })
 
+    # v0.5.1: check #5 — NARRATION COVERAGE. Without this, an LLM that
+    # forgets the `narration` field on video_stop steps gets silent
+    # videos with no feedback. Surface the gap at preflight time.
+    video_stops_with_narration = [
+        s for s in steps
+        if s.get("action") == "video_stop" and s.get("narration")
+    ]
+    video_stops_all = [s for s in steps if s.get("action") == "video_stop"]
+    if not video_stops_all:
+        checks.append({
+            "name": "narration coverage",
+            "status": "OK",
+            "detail": "no video sessions in this script (n/a)",
+            "fix": None,
+        })
+    elif len(video_stops_with_narration) == len(video_stops_all):
+        checks.append({
+            "name": "narration coverage",
+            "status": "OK",
+            "detail": f"all {len(video_stops_all)} video session(s) have narration[]",
+            "fix": None,
+        })
+    elif len(video_stops_with_narration) == 0:
+        # The most common silent-failure case. Loud FAIL.
+        missing = [s.get("name", f"<step-{steps.index(s)}>") for s in video_stops_all]
+        checks.append({
+            "name": "narration coverage",
+            "status": "FAIL",
+            "detail": (f"all {len(video_stops_all)} video session(s) are missing the "
+                       f"`narration` field; output videos will be SILENT. "
+                       f"Missing: {missing}"),
+            "fix": ("Add a `narration` list (one string per task-card step) to each "
+                    "video_stop step. One entry per task-card step. The recorder will "
+                    "synthesize each segment with edge-tts and mux the audio onto the "
+                    "mp4. If you genuinely want silent videos, pass --strict-narration=off "
+                    "(future) or remove the video sessions entirely."),
+        })
+    else:
+        missing = [s.get("name", f"<step-{steps.index(s)}>") for s in video_stops_all
+                   if not s.get("narration")]
+        checks.append({
+            "name": "narration coverage",
+            "status": "WARN",
+            "detail": (f"{len(video_stops_all) - len(video_stops_with_narration)} of "
+                       f"{len(video_stops_all)} video session(s) missing narration; "
+                       f"will be silent: {missing}"),
+            "fix": ("Add `narration: [...]` to each video_stop step listed above."),
+        })
+
     if as_json:
         print(json.dumps({"file": str(script_path), "checks": checks}, ensure_ascii=False, indent=2))
     else:

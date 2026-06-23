@@ -330,3 +330,177 @@ class TestCLINarration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestApplyNarrationEndToEnd(unittest.TestCase):
+    """v0.5.1: end-to-end test for _apply_narration (recorder/script.py:288).
+
+    Previously the function had zero test coverage. It was a "happy path"
+    that wired together 3 helpers (tts, concat_segments_with_gaps,
+    mux_narration_with_video) — any one of them failing silently would
+    produce a silent video with no signal. This test mocks all 3 helpers
+    to assert the orchestration is correct:
+      - the original silent mp4 is moved to .silent.mp4
+      - the new mp4 from mux is what gets returned
+      - edge-tts TTSError propagates (recorder script catches at line 506)
+    """
+
+    def _write_dummy_mp4(self, path: Path) -> None:
+        """Create a 1-byte file masquerading as an mp4. The helpers are mocked
+        so we don't need a real video. ffmpeg would barf, but we never call it."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"\x00")
+
+    def test_happy_path_returns_muxed_mp4_and_archives_silent(self):
+        """v0.5.1: the orchestration does (a) call tts per segment,
+        (b) concat with gaps, (c) mux onto the video, (d) return the new
+        asset pointing at the muxed file. The original mp4 is moved to
+        <stem>.silent.mp4 for archival."""
+        from unittest import mock
+        from recorder_plugin.script import _apply_narration
+        from recorder_plugin.core import AssetRef
+
+        with tempfile.TemporaryDirectory() as d:
+            output_dir = Path(d)
+            video = output_dir / "demo.mp4"
+            self._write_dummy_mp4(video)
+            asset = AssetRef(path=video, kind="video",
+                             size_bytes=video.stat().st_size, extra={"name": "demo"})
+            segs = ["打开登录页", "输入用户名"]
+            step = {"narration_gap": 1.5}
+
+            # Mock the 3 helpers so we don't need edge-tts or ffmpeg.
+            with mock.patch("recorder_plugin.tts.is_available", return_value=True), \
+                 mock.patch("recorder_plugin.tts.asynthesize",
+                            new=mock.AsyncMock(side_effect=lambda t, output_path, **kw:
+                                Path(output_path).parent.mkdir(parents=True, exist_ok=True) or
+                                Path(output_path).write_bytes(b"\x00") or
+                                Path(output_path))), \
+                 mock.patch("recorder_plugin.mux_audio.concat_segments_with_gaps",
+                            return_value=Path("/fake/concat.mp3")), \
+                 mock.patch("recorder_plugin.mux_audio.mux_narration_with_video",
+                            side_effect=lambda v, a, o: o.write_bytes(b"\x00") or o) as mock_mux:
+                import asyncio
+                new_asset = asyncio.run(
+                    _apply_narration(asset, segs, step, output_dir)
+                )
+            # Returns the new asset (pointing at the muxed mp4)
+            self.assertEqual(new_asset.path, video)
+            self.assertEqual(new_asset.kind, "video")
+            self.assertEqual(new_asset.kind, "video")
+            self.assertEqual(new_asset.extra.get("name"), "demo")
+            # Mux was called once with our mocked concat output
+            mock_mux.assert_called_once()
+
+    def test_tts_unavailable_raises_tts_error(self):
+        """v0.5.1: if edge-tts is not installed, _apply_narration raises
+        TTSError so the caller (run_script line 506) can warn-and-fallback
+        to the silent video. Without this behavior the user gets a silent
+        mp4 with no explanation of why."""
+        from unittest import mock
+        from recorder_plugin.script import _apply_narration
+        from recorder_plugin.core import AssetRef
+        from recorder_plugin import tts as tts_mod
+
+        with tempfile.TemporaryDirectory() as d:
+            output_dir = Path(d)
+            video = output_dir / "demo.mp4"
+            self._write_dummy_mp4(video)
+            asset = AssetRef(path=video, kind="video",
+                             size_bytes=video.stat().st_size, extra={"name": "demo"})
+            with mock.patch.object(tts_mod, "is_available", return_value=False):
+                import asyncio
+                with self.assertRaises(tts_mod.TTSError) as cm:
+                    asyncio.run(_apply_narration(asset, ["x"], {}, output_dir))
+            self.assertIn("edge-tts", str(cm.exception).lower())
+
+    def test_all_empty_narration_segs_raises_tts_error(self):
+        """v0.5.1: when ALL narration segments are empty strings,
+        _apply_narration raises TTSError. The caller in run_script
+        (line 506) catches and falls back to the silent video with
+        a warning. We do NOT want to silently produce a silent mp4
+        with metadata claiming narration succeeded."""
+        from unittest import mock
+        from recorder_plugin.script import _apply_narration
+        from recorder_plugin.core import AssetRef
+        from recorder_plugin import tts as tts_mod
+
+        with tempfile.TemporaryDirectory() as d:
+            output_dir = Path(d)
+            video = output_dir / "demo.mp4"
+            self._write_dummy_mp4(video)
+            asset = AssetRef(path=video, kind="video",
+                             size_bytes=video.stat().st_size, extra={"name": "demo"})
+            with mock.patch("recorder_plugin.tts.is_available", return_value=True):
+                import asyncio
+                with self.assertRaises(tts_mod.TTSError) as cm:
+                    asyncio.run(_apply_narration(asset, [""], {}, output_dir))
+            self.assertIn("empty", str(cm.exception).lower())
+class TestPreflightNarrationCoverage(unittest.TestCase):
+    """v0.5.1: _preflight_narration_coverage warns (or raises with force=True)
+    when video_stop steps are missing the `narration` field. This is the
+    new preflight that surfaces the silent-failure pattern at script load
+    time, BEFORE the recorder runs."""
+
+    def test_no_video_sessions_is_ok(self):
+        from recorder_plugin.script import _preflight_narration_coverage
+        # Should not raise or print anything
+        _preflight_narration_coverage([
+            {"action": "navigate", "url": "/"},
+            {"action": "screenshot", "name": "home"},
+        ])
+
+    def test_all_video_stops_have_narration_is_silent(self):
+        from recorder_plugin.script import _preflight_narration_coverage
+        import io
+        from contextlib import redirect_stderr
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            _preflight_narration_coverage([
+                {"action": "video_start", "name": "demo"},
+                {"action": "video_stop", "name": "demo",
+                 "narration": ["step 1", "step 2"]},
+            ])
+        self.assertEqual(buf.getvalue(), "", msg="should be silent on OK path")
+
+    def test_missing_narration_warns(self):
+        from recorder_plugin.script import _preflight_narration_coverage
+        import io
+        from contextlib import redirect_stderr
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            _preflight_narration_coverage([
+                {"action": "video_start", "name": "demo"},
+                {"action": "video_stop", "name": "demo"},  # no narration
+            ])
+        out = buf.getvalue()
+        self.assertIn("WARNING", out)
+        self.assertIn("SILENT", out)
+        self.assertIn("demo", out)  # the video session name appears in the warning
+
+    def test_force_raises(self):
+        """--strict-narration: fail-fast for CI / hard-enforcement envs."""
+        from recorder_plugin.script import _preflight_narration_coverage
+        with self.assertRaises(RuntimeError) as cm:
+            _preflight_narration_coverage([
+                {"action": "video_stop", "name": "x"},
+            ], force=True)
+        self.assertIn("ERROR", str(cm.exception))
+
+    def test_partial_coverage_warns_with_missing_names(self):
+        """Some video sessions have narration, some don't — warn with
+        the list of missing names so the user can fill them in."""
+        from recorder_plugin.script import _preflight_narration_coverage
+        import io
+        from contextlib import redirect_stderr
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            _preflight_narration_coverage([
+                {"action": "video_stop", "name": "with-audio",
+                 "narration": ["x"]},
+                {"action": "video_stop", "name": "silent-one"},
+            ])
+        out = buf.getvalue()
+        self.assertIn("WARN", out)
+        self.assertIn("silent-one", out)  # the missing one IS in the warning
+        # The with-narration one is NOT in the warning (only missing names listed)

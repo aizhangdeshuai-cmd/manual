@@ -350,9 +350,18 @@ narration_rate: "+0%"  # 可选,语速调节
 
 **约束**:
 - narration 是**可选字段**,不写就不配音,录屏走原流程
+  - **v0.5.1:** 缺 `narration` 字段的 video_stop 在运行时会有 stderr WARNING 提示
+    (例:`WARNING: 3 video session(s) have NO \`narration\` field; output videos
+    will be SILENT. ...`),并在 skill 端 `check-recorder-script` 报 FAIL,免得
+    "录完才发现没声音"才回头查
+  - 需要 CI 强制要求?在 v0.5.1 之后会再加 `--strict-narration` flag 让
+    `_preflight_narration_coverage(force=True)` 抛错退出
 - 旁白文案要**口语化、动词开头、≤ 30 字 / 段**,与步骤文字保持同步
 - 不需要重复步骤里的细节(用户已经看到画面),只补充"在做什么、为什么"
-- edge-tts 离线不可用时,recorder 跳过 narration(降级不报错),产物仍是无声视频
+- edge-tts 离线不可用时,recorder 跳过 narration(降级不报错),产物仍是无声视频。
+  这是**第二种 silent 失败场景**:① 字段缺失 ② TTS 不可用。两者都会产生无声视频,
+  区别是 ① 走 preflight WARNING,② 走 runtime `WARNING: narration failed` 并
+  保留 .silent.mp4 备份
 
 **示例 — 完整任务卡 + narration**:
 

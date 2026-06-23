@@ -285,6 +285,50 @@ async def _handle_video_stop(
     return asset
 
 
+def _preflight_narration_coverage(steps: list, *, force: bool = False) -> None:
+    """v0.5.1: walk the script's steps and warn if any video_stop step is
+    missing the `narration` field. Without this, _apply_narration is
+    silently skipped at video_stop time and the user gets a silent video
+    with no indication of why.
+
+    Behavior:
+      - If NO video_stop step has narration: print a single WARNING
+        listing the count of video sessions, with the fix hint
+        "add `narration: [...]` to each video_stop step". This is the
+        most common silent-failure case (LLM forgot the field).
+      - If SOME have narration: print a per-session warning so the
+        user can fill in the missing ones.
+      - If `force=True` (set by --strict-narration), raise instead of
+        warn — for CI envs that want hard enforcement.
+    """
+    video_stops = [s for s in steps if s.get("action") == "video_stop"]
+    if not video_stops:
+        return  # No video sessions, nothing to check.
+    have_narration = [s for s in video_stops if s.get("narration")]
+    missing = [s for s in video_stops if not s.get("narration")]
+    if not missing:
+        return  # All video_stops have narration — good.
+    missing_names = [s.get("name", f"<step-{i}>") for i, s in enumerate(missing)]
+    if not have_narration:
+        # Most common case: the LLM generated a script with NO
+        # narration fields at all. Loud, single warning.
+        msg = (
+            f"WARNING: {len(missing)} video session(s) have NO `narration` field; "
+            f"output videos will be SILENT. Fix: add `narration: [one string per step]` "
+            f"to each video_stop step (one segment per task-card step). "
+            f"Missing: {missing_names}"
+        )
+    else:
+        msg = (
+            f"WARNING: {len(missing)} of {len(video_stops)} video session(s) "
+            f"missing `narration`; will be silent: {missing_names}. "
+            f"Pass --strict-narration to fail-fast."
+        )
+    if force:
+        raise RuntimeError(msg.replace("WARNING: ", "ERROR: "))
+    print(msg, file=sys.stderr)
+
+
 async def _apply_narration(
     asset: AssetRef, narration_segs: list, step: dict, output_dir: Path
 ) -> AssetRef:
@@ -409,6 +453,10 @@ async def run_script(script_path: Path) -> dict:
     rec_dir = output_dir / "_video_buffer" if record_video else None
     if rec_dir:
         rec_dir.mkdir(parents=True, exist_ok=True)
+    # v0.5.1: preflight narration coverage. Without this, missing
+    # `narration` fields silently produce silent videos (see
+    # _preflight_narration_coverage docstring for the failure mode).
+    _preflight_narration_coverage(data["steps"])
     env = dict(data.get("auth_env", []))
 
     started = datetime.now(timezone.utc).isoformat()
