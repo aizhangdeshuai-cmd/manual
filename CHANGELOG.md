@@ -4,6 +4,48 @@ Top-level changelog for the user-manual skill. The recorder opt-in
 plugin (`recorder/`) has its own changelog at `recorder/CHANGELOG.md` —
 versioned in lockstep with the main skill.
 
+## 1.0.2 (2026-06-23) — file:// images and videos now actually load
+
+Followup to v1.0.1: the build_standalone output contained real
+`<img src="../screenshots/foo.png">` and `<source src="../videos/
+foo.mp4">` tags, but when the .html file is double-clicked
+(`file://` mode), browsers **refuse to load relative-path images
+and videos** for security. Users saw a "manual with no images,
+no videos" even though the file was technically correct.
+
+v1.0.2 adds `_inline_assets_to_data_urls()` to
+`build_standalone`. It walks the inlined .md blocks, finds every
+`![alt](path.png)` markdown image and every `<source>/<video>/
+<img> src="path.mp4"` tag emitted by `_convert_video_links_to_html`,
+reads the file, and rewrites the path as a `data:image/png;base64,...`
+or `data:video/mp4;base64,...` URI. The .html now contains the
+binary inline, so it works under `file://` and offline.
+
+### What changed
+
+- `scripts/manual_helper.py: _inline_assets_to_data_urls()` new helper.
+  Resolves paths relative to the .md file's directory, with fallbacks
+  to `screenshots/` and `videos/` subdirs (since the build_standalone
+  output is in `<project>/docs/user-manual/` and .md files reference
+  `../screenshots/...`).
+- `build_standalone()` calls it AFTER `_convert_video_links_to_html`
+  so the freshly-emitted `<source src=...>` tags also get inlined.
+
+### Manual probes (grc project)
+
+- Before: 0 data: URLs in user-manual-standalone.html. 28 broken
+  relative-path image refs. 28 broken relative-path video refs.
+- After: 42 data:image URLs + 6 data:video URLs in
+  user-manual-standalone.html. All 28 PNG + 6 MP4 references
+  resolve to inline base64. The file is now self-contained and
+  works under `file://`.
+
+### Tests
+
+- 59/59 pass in `scripts/tests/{test_manual_helper,test_validate_output}.py`
+  (no test changes needed; existing fixtures don't exercise
+  build_standalone with assets).
+
 ## 1.0.1 (2026-06-23) — hard-gate the things the LLM kept forgetting
 
 Audit of grc project (regenerated 2026-06-23 with v1.0.0) found

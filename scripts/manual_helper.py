@@ -1527,6 +1527,89 @@ def _convert_video_links_to_html(text: str) -> str:
 
 
 
+def _inline_assets_to_data_urls(text, md_path):
+    """v1.0.1: for build_standalone output (file:// mode), inline
+    all referenced PNG / MP4 / JPG files as base64 `data:` URLs so
+    the rendered HTML works when double-clicked (browsers refuse
+    to load relative-path images in file:// mode for security).
+    """
+    import re as _ire, base64
+    md_dir = md_path.parent
+    IMG_EXTS = ("png", "jpg", "jpeg", "gif", "webp")
+    VID_EXTS = ("mp4", "webm", "mov")
+    ALL_EXTS = IMG_EXTS + VID_EXTS
+
+    def _resolve(rel_path):
+        if rel_path.startswith(("data:", "http://", "https://", "#")):
+            return None
+        clean = rel_path.split("?")[0].split("#")[0]
+        if not any(clean.lower().endswith("." + e) for e in ALL_EXTS):
+            return None
+        candidates = [
+            md_dir / clean,
+            md_dir / "screenshots" / Path(clean).name,
+            md_dir / "videos" / Path(clean).name,
+            md_dir / "assets" / Path(clean).name,
+        ]
+        for c in candidates:
+            try:
+                resolved = c.resolve()
+            except OSError:
+                continue
+            if resolved.exists() and resolved.is_file():
+                try:
+                    data = resolved.read_bytes()
+                except OSError:
+                    continue
+                if clean.lower().endswith(".png"):
+                    mime = "image/png"
+                elif clean.lower().endswith((".jpg", ".jpeg")):
+                    mime = "image/jpeg"
+                elif clean.lower().endswith(".gif"):
+                    mime = "image/gif"
+                elif clean.lower().endswith(".webp"):
+                    mime = "image/webp"
+                elif clean.lower().endswith(".mp4"):
+                    mime = "video/mp4"
+                elif clean.lower().endswith(".webm"):
+                    mime = "video/webm"
+                else:
+                    mime = "video/quicktime"
+                return "data:" + mime + ";base64," + base64.b64encode(data).decode("ascii")
+        return None
+
+    # 1) Markdown image refs: ![alt](path)
+    def _md(m):
+        prefix_b, alt, paren_b, src, paren_e = (
+            m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)
+        )
+        data_url = _resolve(src)
+        if data_url is None:
+            return m.group(0)
+        return prefix_b + alt + paren_b + data_url + paren_e
+    text = _ire.sub(
+        r"(!\[)([^\]]*)(\]\()([^\s)]+)(\))",
+        _md, text,
+    )
+
+    # 2) Tag refs: <source src="path">, <video src="path">, <img src="path">
+    def _tag(m):
+        full = m.group(0)
+        sm = _ire.search(r'src="([^"]+)"', full)
+        if not sm:
+            return full
+        src = sm.group(1)
+        data_url = _resolve(src)
+        if data_url is None:
+            return full
+        return full.replace('src="' + src + '"', 'src="' + data_url + '"')
+    text = _ire.sub(
+        r"<(?:source|video|img)\b[^>]*?\bsrc=\"[^\"]+\"[^>]*>",
+        _tag, text,
+    )
+    return text
+
+
 def build_standalone(html_template_path: Path, html_out_path: Path, md_paths: list[Path]) -> Path:
     """Read the html template, inline all .md files as <script> blocks, write out.
 
@@ -1561,6 +1644,12 @@ def build_standalone(html_template_path: Path, html_out_path: Path, md_paths: li
         # (no JS needed to see the player). Mirrors the runtime
         # convertVideoLinksInMd() in the viewer template.
         text = _convert_video_links_to_html(text)
+        # v1.0.1: inline PNG/MP4 references as data: URLs so the
+        # standalone .html works under file:// (browsers block
+        # relative-path images there). Runs AFTER video conversion
+        # so <source src=...> tags from _convert_video_links_to_html
+        # also get inlined.
+        text = _inline_assets_to_data_urls(text, p)
         # Escape </script> to avoid breaking out of the script tag
         text = text.replace("</script>", "<\\/script>")
         sid = _slugify_for_id(p.name)
