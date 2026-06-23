@@ -7,6 +7,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent.parent / "manual_helper.py"
@@ -96,32 +97,40 @@ class InitSkillRecordingBlockedTests(unittest.TestCase):
                 # v0.4.0: must print BLOCKED message + Options
                 self.assertIn("BLOCKED", r.stderr, "missing BLOCKED badge in stderr")
                 self.assertIn("recording phase is BLOCKED", r.stderr)
-                self.assertIn("--allow-blocked", r.stderr)
+                # v1.0.0: --allow-blocked removed. Options menu shows
+                # --no-install and "fix the issues" only.
+                self.assertNotIn("--allow-blocked", r.stderr)
                 self.assertIn("--no-install", r.stderr)
 
-    def test_init_skill_allow_blocked_exits_0(self):
-        """v0.4.0: --allow-blocked overrides the BLOCKED exit
-        and returns 0. Use case: writing the manual first, then
-        recording later in a different env."""
+    def test_init_skill_allow_blocked_flag_is_rejected_v1_0_0(self):
+        """v1.0.0: --allow-blocked was removed. Passing it must
+        exit 2 with a clear error message, not silently succeed."""
         with tempfile.TemporaryDirectory() as d:
             personas = Path(d) / "docs" / "user-manual" / "personas.json"
             personas.parent.mkdir(parents=True, exist_ok=True)
             personas.write_text('{"personas": [{"id": "x", "name": "X"}]}')
             r = run_module("init-skill", "--allow-blocked", d)
-            self.assertEqual(r.returncode, 0, msg=r.stderr)
-            # Should NOT print the BLOCKED error path
-            self.assertNotIn("recording phase is BLOCKED", r.stderr)
+            self.assertEqual(r.returncode, 2, msg=r.stderr)
+            self.assertIn("removed in v1.0.0", r.stderr)
+            self.assertIn("real screenshots and videos", r.stderr)
 
     def test_init_skill_no_install_skips_auto_install(self):
         """v0.4.0: --no-install skips the auto-install step. In a
         CI env where deps come from another channel (Docker image,
         system pip), this prevents init-skill from trying to pip
-        install behind the user's back."""
+        install behind the user's back.
+
+        v1.0.0: --allow-blocked removed. We mock a fully-OK
+        recording readiness so init-skill can complete even on
+        hosts without recorder deps installed."""
         with tempfile.TemporaryDirectory() as d:
             personas = Path(d) / "docs" / "user-manual" / "personas.json"
             personas.parent.mkdir(parents=True, exist_ok=True)
             personas.write_text('{"personas": [{"id": "x", "name": "X"}]}')
-            r = run_module("init-skill", "--no-install", "--allow-blocked", d)
+            with mock.patch("manual_helper.check_recording_readiness",
+                            return_value={"status": "ok", "summary": "mocked",
+                                          "checks": []}):
+                r = run_module("init-skill", "--no-install", d)
             self.assertEqual(r.returncode, 0, msg=r.stderr)
             # The "auto-installing" progress message must NOT appear
             # when --no-install is set
@@ -146,6 +155,15 @@ class RecordAndReplaceTests(unittest.TestCase):
         r = run_module("record-and-replace", "--help")
         self.assertEqual(r.returncode, 0, msg=r.stderr)
         self.assertIn("usage: record-and-replace", r.stderr)
+
+    def test_record_and_replace_allow_blocked_flag_is_rejected_v1_0_0(self):
+        """v1.0.0: --allow-blocked was removed. Passing it must
+        exit 2 with a clear error message."""
+        r = run_module("record-and-replace", "--allow-blocked",
+                      "/nonexistent/manual.md")
+        self.assertEqual(r.returncode, 2, msg=r.stderr)
+        self.assertIn("removed in v1.0.0", r.stderr)
+        self.assertIn("real screenshots and videos", r.stderr)
 
     def test_record_and_replace_missing_manual(self):
         """v0.4.0: missing manual path -> exit 2 with clear error."""
@@ -451,7 +469,10 @@ class InitSkillAutoRegenTests(unittest.TestCase):
             # Stale viewer (version 1)
             stale = um / "user-manual.html"
             stale.write_text("<!-- user-manual-dashboard-version: 1 -->\n<html></html>")
-            r = run_module("init-skill", "--allow-blocked", d)
+            with mock.patch("manual_helper.check_recording_readiness",
+                            return_value={"status": "ok", "summary": "mocked",
+                                          "checks": []}):
+                r = run_module("init-skill", d)
             self.assertEqual(r.returncode, 0, msg=f"init-skill crashed: {r.stderr[:500]}")
             new_text = stale.read_text()
             # The file should now match the current template version
@@ -475,7 +496,10 @@ class InitSkillAutoRegenTests(unittest.TestCase):
             (um / "personas.json").write_text('{"personas": [{"id": "x", "name": "X"}]}')
             target = um / "user-manual.html"
             self.assertFalse(target.exists(), "precondition: file must not exist yet")
-            r = run_module("init-skill", "--allow-blocked", d)
+            with mock.patch("manual_helper.check_recording_readiness",
+                            return_value={"status": "ok", "summary": "mocked",
+                                          "checks": []}):
+                r = run_module("init-skill", d)
             self.assertEqual(r.returncode, 0, msg=f"init-skill crashed: {r.stderr[:500]}")
             self.assertTrue(target.exists(),
                             msg=f"user-manual.html not created: stderr={r.stderr[:400]}")
@@ -497,7 +521,10 @@ class InitSkillAutoRegenTests(unittest.TestCase):
             tmpl = SCRIPT_DIR.parent / "templates" / "user-manual.html"
             shutil.copyfile(tmpl, target)
             original_bytes = target.read_bytes()
-            r = run_module("init-skill", "--allow-blocked", d)
+            with mock.patch("manual_helper.check_recording_readiness",
+                            return_value={"status": "ok", "summary": "mocked",
+                                          "checks": []}):
+                r = run_module("init-skill", d)
             self.assertEqual(r.returncode, 0, msg=r.stderr)
             # File is byte-identical (no spurious write)
             self.assertEqual(target.read_bytes(), original_bytes,

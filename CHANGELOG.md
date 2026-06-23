@@ -4,6 +4,52 @@ Top-level changelog for the user-manual skill. The recorder opt-in
 plugin (`recorder/`) has its own changelog at `recorder/CHANGELOG.md` —
 versioned in lockstep with the main skill.
 
+## 1.0.0 (2026-06-23) — BREAKING: drafts are no longer a deliverable
+
+**User requirement (2026-06-23)**: "运行这个技能后，生成的手册要有图片要有视频（加旁白）".
+
+v0.5.4 introduced a `skip` mode that allowed LLM agents to deliver a
+manual with `待补资产清单` (asset checklist) at
+the bottom instead of recording real assets. In practice every
+project used it, producing manuals with 100% broken image refs.
+v1.0.0 removes the option entirely. There is no longer any way to
+deliver a user-manual skill artifact that lacks real screenshots
+or narrated videos.
+
+### Breaking changes
+
+1. **§14 `skip` mode removed.** Only `record` and `screenshot-only`
+   are valid recording modes. The `待补资产清单` section
+   and its corresponding `validate-output.py` logic are gone.
+2. **`init-skill --allow-blocked` removed.** The flag is now an
+   error. If the dev server is unreachable after auto-install,
+   `init-skill` exits 2 with a "fix the environment" menu.
+3. **`record-and-replace --allow-blocked` removed.** Same error
+   path. URL-unreachable in preflight is a hard FAIL, not WARN.
+4. **SKILL.md description** updated to declare the hard requirement
+   that every deliverable contains real screenshots + narrated
+   videos, with no draft/skip opt-out.
+
+### Preserved from v0.5.4
+
+- §2.2 alt-text forbidden patterns (4 patterns, validated by
+  `_check_placeholder_alt`).
+- §5.4 double-gate (bash 7-check + `validate-output.py --strict`,
+  both must exit 0 before LLM can claim the manual is complete).
+- The 272-test suite (now 271 after removing the obsolete
+  `test_init_skill_allow_blocked_exits_0`).
+
+### Upgrade notes for existing projects
+
+- Re-running this skill on a project that previously used
+  `--allow-blocked` will now fail at the recording preflight. The
+  user must start the dev server (or fix the recorder deps) and
+  re-run.
+- Manuals with `待补资产清单` sections from v0.5.4
+  are obsolete: the section is no longer recognized as a valid
+  finish state. The next run will replace the placeholders with
+  real assets (or fail the recording preflight).
+
 ## 0.5.4 (2026-06-23) — 草稿不再当成品: skip-mode 待补资产清单 + alt 禁橢模式 + 硬门
 
 Audit of grc project (2026-06-23) showed that v0.5.3-stamped manuals

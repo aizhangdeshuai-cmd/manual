@@ -1,6 +1,6 @@
 ---
 name: user-manual
-description: Generate and incrementally maintain a per-project user manual at `<project>/docs/user-manual/manual/*.md` plus a self-contained HTML viewer, by analyzing the project's superpowers artifacts (`docs/superpowers/{specs,plans,findings,reviews}/`) and fortifying with web search. Trigger on `/user-manual`, "generate user manual", "create user manual", "update the user manual", "refresh the manual", "build a manual from the specs and plans", or any phrase asking for end-user / operator documentation drawn from project specs and plans. Idempotent across runs (the optional `## Citations` section, off by default, records the SHA256 of every cited artifact when `manual-config.json` sets `include_citations: true`; only new or changed artifacts are folded in on subsequent runs). Targets business users as the primary audience (operations / specialist / manager / approver / external collaborators), and writes in the **Feishu / DingTalk-style** user-guide tradition: granular task cards (one task card = one specific operation, not a user journey), screenshot-driven with colloquial captions, "操作前必看" preamble per task card, ultra-short imperative sentences, embedded Q&A section, video support alongside screenshots. Frontmatter reserves `audience / task / prerequisites / related` fields for future Q&A AI integration. Project-agnostic core + project-layer config — same skill works on any project that fills in `manual-config.json` + `personas.json`. When the optional `recorder/` opt-in plugin is installed, screenshots and videos are produced automatically by the recorder's LLM agent invoking Playwright; the plugin's design lives in `recorder/SKILL.md` and install steps in `recorder/INSTALL.md`. Do not invoke for purely internal / developer-facing READMEs that aren't drawn from superpowers artifacts.
+description: Generate and incrementally maintain a per-project user manual at `<project>/docs/user-manual/manual/*.md` plus a self-contained HTML viewer, by analyzing the project's superpowers artifacts (`docs/superpowers/{specs,plans,findings,reviews}/`) and fortifying with web search. Trigger on `/user-manual`, "generate user manual", "create user manual", "update the user manual", "refresh the manual", "build a manual from the specs and plans", or any phrase asking for end-user / operator documentation drawn from project specs and plans. Idempotent across runs (the optional `## Citations` section, off by default, records the SHA256 of every cited artifact when `manual-config.json` sets `include_citations: true`; only new or changed artifacts are folded in on subsequent runs). Targets business users as the primary audience (operations / specialist / manager / approver / external collaborators), and writes in the **Feishu / DingTalk-style** user-guide tradition: granular task cards (one task card = one specific operation, not a user journey), screenshot-driven with colloquial captions, "操作前必看" preamble per task card, ultra-short imperative sentences, embedded Q&A section, video support alongside screenshots. Frontmatter reserves `audience / task / prerequisites / related` fields for future Q&A AI integration. Project-agnostic core + project-layer config — same skill works on any project that fills in `manual-config.json` + `personas.json`. **v1.0.0 hard requirement**: every deliverable MUST contain real screenshots and narrated videos (alt text cannot be `占位:` / `<TODO:>`; `[SCREENSHOT: x]` / `[VIDEO: x]` placeholders cannot remain in the final text). There is no skip/draft mode — if the recording phase cannot run, the skill exits with an error and the LLM must fix the environment (start dev server, install deps) before re-running. When the `recorder/` opt-in plugin is installed, screenshots and videos are produced automatically by the recorder's LLM agent invoking Playwright; the plugin's design lives in `recorder/SKILL.md` and install steps in `recorder/INSTALL.md`. Do not invoke for purely internal / developer-facing READMEs that aren't drawn from superpowers artifacts.
 ---
 
 # User Manual
@@ -101,7 +101,7 @@ Both cases use the same routine; the existing-manual case skips artifacts whose 
 - "弹出一个窗口 / 抽屉 / 全屏"(UI 形态)
 
 **v0.5.4: alt 文本禁止模式**(遇到 LLM 会完量跳过):
-- ❌ `占位:指标列表` / `占位:新增` / `占位:表单` — LLM 看到截图不在事就用“占位:”拼出来的冗余 alt,同事资产应直接不写这个引用(或者走 skip 模式 → 待补资产清单)
+- ❌ `占位:指标列表` / `占位:新增` / `占位:表单` — LLM 看到截图不在事就用“占位:”拼出来的冗余 alt。v1.0.0 不允许这种 alt 存在 — 要么走 record 模式拍真图,要么删掉这个引用。
 - ❌ `系统截图` / `screenshot` / `img1` — 沉默占位,要么补出真实地位描述,要么删除引用
 - ❌ `这个页面显示了 X` / `详情页面截图包含 Y` — 描述式 alt(上面 §2.2 反例),> 15 字
 - ❌ alt 直接拷负文件名 `指标列表.png` — 读画面的人看不懂
@@ -790,26 +790,41 @@ The recorder produces files matching the `<domain>-<task>-<element>.png` naming 
 > command, one exit code, no step to forget. Use `--dry-run` to preview
 > the mapping without actually recording.
 >
-> **Pre-condition (v0.4.0)**: `init-skill` now auto-installs the
-> recorder dependencies (`playwright` + Chromium) and exits 1 if the
-> dev server isn't reachable. To write a manual without recording
-> (e.g. dev server is on another host), pass `--allow-blocked`.
+> **Pre-condition (v1.0.0)**: `init-skill` auto-installs the
+> recorder dependencies (`playwright` + Chromium) and exits 2 if
+> the recording phase cannot run (dev server unreachable, deps
+> missing). There is no opt-out: fix the environment and re-run.
+> The previous `--allow-blocked` flag was removed in v1.0.0.
 
 ### When this section applies
 
-After §5 (write the manual markdown), the agent must run §14 if the project is a **web app** with a runnable dev/staging environment. Skip if:
-- The project is a desktop app, CLI tool, or pure API (no UI to record).
-- The user explicitly says "skip recording" or "manual only".
+After §5 (write the manual markdown), the agent must run §14 if the project is a **web app** with a runnable dev/staging environment. §14 is **mandatory** for web apps — there is no "skip" option. Web apps without recording do not satisfy v1.0.0. §14 is not needed for:
+- Desktop apps, CLI tools, pure APIs (no UI to record).
+- Projects where the user explicitly says "screenshots only" (use
+  the `screenshot-only` mode in option 2 above).
 
 ### The 3-option flow
 
-The LLM agent must ask the user **once** which mode to use, with a default of "record":
+**v1.0.0: only two valid modes — no skip option.** A user-manual
+deliverable without real screenshots and narrated videos is not a
+valid deliverable. The LLM agent must ask the user **once** which
+mode to use, with a default of "record":
 
-1. **`record`** (default) — record screenshots AND video for the key steps. Requires: target URL, login credentials (env var names), which steps are "key" (the rest get screenshots only).
-2. **`screenshot-only`** — record screenshots but skip video. Lighter, faster.
-3. **`skip`** — leave the placeholders in place. User will fill them later by hand or with another tool.
+1. **`record`** (default) — record screenshots AND narrated video
+   for the key steps. Requires: target URL, login credentials
+   (env var names), which steps are "key" (the rest get screenshots
+   only). **This is the only mode that produces a valid v1.0.0
+   deliverable.**
+2. **`screenshot-only`** — record screenshots but skip video.
+   Lighter, faster. Use this when the project explicitly does not
+   need videos (e.g. CLI tool, no UI animation).
 
-   ⚠️ **v0.5.4 hard rule (skip mode)**: if the LLM agent picks `skip`, the resulting manual **MUST** end with a `## 待补资产清单` section that lists every unreplaced `[SCREENSHOT: x]` / `[VIDEO: x]` / `![占位:...](path.png)` reference (one per line, with the manual-relative path). `validate-output.py --strict` will fail the manual if this section is missing **or** the listed paths don't match the actual missing assets. The user is opting into a draft, and a draft is only valid if it self-documents what's missing. The LLM agent must also surface this in its final reply ("手册草稿，N 个截图/视频待补，路径如下").
+> **No "skip" mode in v1.0.0.** v0.5.4 introduced a `skip` mode
+> that required a `待补资产清单` section at the
+> bottom of the manual. In practice the LLM agent always picked
+> `skip` and shipped 100% broken image refs. v1.0.0 removes the
+> option entirely. If the recording phase cannot run, fix the
+> environment and re-run; do not deliver a draft.
 
 ### Workflow (mode = `record` or `screenshot-only`)
 
@@ -858,11 +873,9 @@ The LLM agent must ask the user **once** which mode to use, with a default of "r
    # → replaces [SCREENSHOT: x] / [VIDEO: x] / [AI ANNOTATE: x] placeholders
    #   with ![x](path) markdown
    # → prints "replaced: N placeholders, placeholders still missing: M"
-   # → if M > 0, the agent must decide: re-run recorder for missing, or
-   #   accept the gap. **v0.5.4**: accepting the gap is only valid in
-   #   `skip` mode AND requires the `## 待补资产清单` section
-   #   (see option 3 above). `validate-output.py --strict` will FAIL the
-   #   manual otherwise.
+   # → **v1.0.0**: M MUST be 0. If recorder missed any, fix the script
+   #   and re-run. A manual with unreplaced placeholders does not
+   #   satisfy the user's requirement (real screenshots + narrated video).
 ```
 
 ### Helper subcommand reference
@@ -873,7 +886,7 @@ The LLM agent must ask the user **once** which mode to use, with a default of "r
 | `record-manual <manual.md> --generate-template <out.json>` | Same, plus emit a recorder script template the LLM agent fills in. |
 | `record-manual <manual.md> --apply-mapping <mapping.json>` | Replace placeholders with real paths from the mapping. Writes the manual back. Recognizes all 3 placeholder kinds. |
 | `record-and-replace <manual.md> --script <recorder.json>` | **v0.4.0**: one-shot pre-flight + run recorder + build mapping + apply + validate. Replaces the 5-step §14 workflow. Pass `--dry-run` to preview the mapping without recording. |
-| `init-skill [--no-install] [--allow-blocked]` | Bootstrap a fresh project. **v0.4.0**: auto-installs recorder deps (playwright + Chromium) when missing, and exits 1 loudly if recording cannot run (LLM agent cannot claim "init done" on an unrecordable project). Use `--allow-blocked` to write the manual first and record later. |
+| `init-skill [--no-install]` | Bootstrap a fresh project. **v1.0.0**: auto-installs recorder deps (playwright + Chromium) when missing; exits 2 loudly if the dev server is unreachable. **No opt-out** — `--allow-blocked` was removed. |
 
 ## 15. AI 标注阶段 (v0.2.4 — agent-mediated, provider-agnostic)
 

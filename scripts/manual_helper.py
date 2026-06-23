@@ -229,7 +229,6 @@ DEFAULT_CONFIG = "\n".join(DEFAULT_CONFIG_LINES)
 def init_skill(
     project_root: Path,
     auto_install: bool = True,
-    allow_blocked: bool = False,
 ) -> dict:
     """One-shot bootstrap for a fresh project (v2 D1, v0.4.0 recorder-on).
 
@@ -247,18 +246,22 @@ def init_skill(
     first-class project input. See SKILL.md section 1 (file location) and
     section 7 (helper subcommands).
 
+    v1.0.0 (BREAKING): the `allow_blocked` parameter was removed.
+    The skill now requires every deliverable to contain real
+    screenshots and narrated videos. There is no opt-out for
+    "write a draft now, record later" — that workflow produced
+    manuals with 100% broken image refs in the wild and is no
+    longer supported.
+
     v0.4.0 (recorder-on): after scaffold, runs `check_recording_readiness()`.
     If status is RED and `auto_install=True` (default), AUTO-INSTALLS the
     missing deps (playwright pip + chromium download) so a single
     `init-skill` brings the project to "ready". If still RED after
-    auto-install, and `allow_blocked=False` (default), this function
-    raises `RecordingBlockedError`. The CLI catches it and exits 1
-    loudly so the LLM agent cannot silently produce a manual that
-    has zero real screenshots. Pass `auto_install=False` for
-    dry-run or CI environments that have deps via other channels.
-    Pass `allow_blocked=True` if you intentionally want to write
-    the manual markdown before recording (e.g. the dev server is
-    only available later).
+    auto-install, this function raises `RecordingBlockedError` (the
+    CLI catches it and exits 2). The LLM agent must then fix the
+    environment (start dev server, install missing deps) and re-run.
+    Pass `auto_install=False` for dry-run or CI environments that
+    have deps via other channels.
 
     Returns a dict:
       {
@@ -300,7 +303,7 @@ def init_skill(
     result["auto_install_attempted"] = auto_install_attempted
     result["auto_install_ok"] = auto_install_ok
 
-    if readiness["status"] == "red" and not allow_blocked:
+    if readiness["status"] == "red":
         raise RecordingBlockedError(
             f"recording phase is BLOCKED for {project_root}: {readiness['summary']}"
         )
@@ -309,8 +312,9 @@ def init_skill(
 
 class RecordingBlockedError(RuntimeError):
     """v0.4.0: raised by init_skill() when post-install readiness is RED
-    and allow_blocked=False. CLI catches this and exits 1 so the LLM
-    agent cannot claim "init done" while the project is unrecordable.
+    CLI catches this and exits 2 so the LLM agent cannot claim
+    "init done" while the project is unrecordable. v1.0.0 removed
+    the previous --allow-blocked opt-out.
     """
 
 
@@ -2025,11 +2029,7 @@ def cmd_record_and_replace(args: list[str]) -> int:
             "usage: record-and-replace <manual.md> [--script <recorder.json>]\n"
             "       [--auto-generate-script] [--dry-run] [--skip-validate]\n"
             "       [--skip-viewer-regen]\n"
-            "       [--skip-script-check] [--target-url URL]\n"
-            "       [--allow-blocked]\n\n"
-            "v0.5.4: --allow-blocked turns preflight FAIL into WARN so\n"
-            "you can write a draft manual even if dev server is down.\n"
-            "Manual must then end with \'## 待补资产清单\' section.\n\n"
+            "       [--skip-script-check] [--target-url URL]\n\n"
             "One-shot: pre-flight check -> run recorder -> apply mapping ->\n"
             "validate. Replaces the 5-step SKILL.md §14 workflow.\n"
             "v0.5.0: --auto-generate-script builds a v0.5.0 template from\n"
@@ -2048,7 +2048,6 @@ def cmd_record_and_replace(args: list[str]) -> int:
     skip_validate = False
     skip_viewer_regen = False
     target_url = None
-    allow_blocked = False
     i = 0
     while i < len(args):
         a = args[i]
@@ -2077,15 +2076,11 @@ def cmd_record_and_replace(args: list[str]) -> int:
             skip_viewer_regen = True
             i += 1
         elif a == "--allow-blocked":
-            # v0.5.4: preflight FAIL (e.g. dev server unreachable)
-            # becomes a WARN, command continues. The user has
-            # acknowledged the manual will be a draft. Per SKILL.md
-            # §14 option 3, the manual MUST end with
-            # "## 待补资产清单" section listing
-            # the unreplaced placeholders, otherwise
-            # validate-output.py --strict will fail it.
-            allow_blocked = True
-            i += 1
+            # v1.0.0: BREAKING. --allow-blocked removed.
+            print("ERROR: --allow-blocked was removed in v1.0.0.", file=sys.stderr)
+            print("  The skill now requires real screenshots and videos.", file=sys.stderr)
+            print("  Start the dev server (or fix the recorder deps) and re-run.", file=sys.stderr)
+            return 2
         elif not a.startswith("--") and manual_path is None:
             manual_path = Path(a)
             i += 1
@@ -2172,24 +2167,14 @@ def cmd_record_and_replace(args: list[str]) -> int:
     for line in preflight_msgs:
         print(f"  {line}", file=sys.stderr)
     if not preflight_ok:
-        if allow_blocked:
-            # v0.5.4: user has explicitly opted into a draft. Continue
-            # with WARN. The manual will end up full of placeholders;
-            # it must self-document them via §14 option 3
-            # (“## 待补资产清单”), or
-            # validate-output.py --strict will reject it.
-            print("", file=sys.stderr)
-            print("⚠️  pre-flight FAILED but --allow-blocked set; continuing as draft.",
-                  file=sys.stderr)
-            print("   (the manual must end with “## 待补资产清单”)",
-                  file=sys.stderr)
-        else:
-            print("", file=sys.stderr)
-            print("❌ pre-flight FAILED — fix the issues above and retry.", file=sys.stderr)
-            print("   Or pass --allow-blocked to write a draft manual anyway", file=sys.stderr)
-            print("   (the manual must then end with “## 待补资产清单”).",
-                  file=sys.stderr)
-            return 2
+        # v1.0.0: hard FAIL. v0.5.4's --allow-blocked branch was removed
+        # because in practice the LLM agent would always pass it and
+        # deliver a draft. Start the dev server, fix deps, or check the
+        # script's --target-url, then re-run.
+        print("", file=sys.stderr)
+        print("❌ pre-flight FAILED — fix the issues above and retry.", file=sys.stderr)
+        print("   (v1.0.0 no longer supports a draft-only deliverable)", file=sys.stderr)
+        return 2
 
     if dry_run:
         # Build the mapping preview without actually recording
@@ -2904,18 +2889,24 @@ def main(argv: list[str]) -> int:
         return 0
 
     if cmd == "init-skill":
-        # v0.4.0: parse --no-install / --allow-blocked flags first so the
-        # positional <proj_root> is whatever non-flag arg remains. Tests
-        # invoke this as `init-skill --allow-blocked <d>` (4 argv slots).
+        # v1.0.0: BREAKING. --allow-blocked removed. A manual without
+        # real screenshots and videos is not a valid deliverable. If
+        # the recording phase cannot run, the LLM must fix the
+        # environment (start dev server, install deps) and re-run.
+        # --no-install is kept for CI environments that manage deps
+        # via other channels.
         auto_install = "--no-install" not in argv
-        allow_blocked = "--allow-blocked" in argv
+        if "--allow-blocked" in argv:
+            print("ERROR: --allow-blocked was removed in v1.0.0.", file=sys.stderr)
+            print("  The skill now requires real screenshots and videos.", file=sys.stderr)
+            print("  Fix the recording-readiness failures and re-run.", file=sys.stderr)
+            return 2
         positionals = [a for a in argv[2:] if not a.startswith("--")]
         proj_root = Path(positionals[0]) if positionals else Path.cwd()
         try:
             result = init_skill(
                 proj_root,
                 auto_install=auto_install,
-                allow_blocked=allow_blocked,
             )
         except FileNotFoundError as e:
             print(f"ERROR: {e}", file=sys.stderr)
@@ -2923,14 +2914,11 @@ def main(argv: list[str]) -> int:
         except RecordingBlockedError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             print("", file=sys.stderr)
-            print("  This means the recording phase (§14) cannot run.", file=sys.stderr)
-            print("  The manual you write will have no real screenshots/videos.", file=sys.stderr)
-            print("", file=sys.stderr)
+            print("  The recording phase (§14) cannot run.", file=sys.stderr)
+            print("  The skill v1.0.0 no longer supports a draft-only deliverable.", file=sys.stderr)
             print("  Options:", file=sys.stderr)
             print("    1. Fix the issues above and re-run `init-skill`", file=sys.stderr)
-            print("    2. Re-run with --allow-blocked if you intentionally want", file=sys.stderr)
-            print("       to write the manual first (you must record later)", file=sys.stderr)
-            print("    3. Re-run with --no-install if you manage deps via CI", file=sys.stderr)
+            print("    2. Re-run with --no-install if you manage deps via CI", file=sys.stderr)
             return 2
         print(f"project root: {proj_root}")
         for p in result["created"]:
