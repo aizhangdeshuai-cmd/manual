@@ -1001,3 +1001,68 @@ You can mix string and dict values in the same mapping file.
 The recording phase has 3 deterministic primitives (scan, generate-template, apply-mapping) because those are easy to get wrong in prose. The LLM-heavy work (running the recorder, picking selectors, handling login state) stays in the LLM agent loop where it belongs.
 
 代价是结构强约束:手册位置固定,7 段(11 段 + 附录)固定,Citations 格式固定。**正是这种结构让幂等成为可能** — 不固定,每次跑都要重新推导。
+
+## 16. 录制器已知陷阱 (recorder gotchas) — v0.3.3
+
+执行方(LLM agent)在填 `recorder-script.json` 时**必须**避免以下陷阱,否则录像会无声 / 缺帧 / 直接失败:
+
+### 16.1 `navigate` 必须用绝对 URL
+
+Playwright 不解析相对 URL。`{ "action": "navigate", "url": "/" }` 会直接报 `Cannot navigate to invalid URL`。
+
+✅ 正确:`"url": "http://127.0.0.1:3100/"`  
+❌ 错误:`"url": "/"` 或 `"url": "settings"`
+
+(v0.3.3 起 `Recorder.navigate` 会用 `urljoin` 把相对 URL 拼成绝对 URL,但脚本作者应**直接**写绝对 URL,避免依赖隐式 base。)
+
+### 16.2 `video_stop` 后页面是空白的(v0.2.1 设计权衡)
+
+`video_stop` 必须关闭当前 page 来 flush Playwright 的 webm 流。关掉后会开一个新 page 替换,**新 page 默认是 about:blank**。
+
+- **后果**:`video_stop` 之后的所有步骤(`wait_for` / `click` / `type` / `screenshot`)都打在空白页上 → 全部失败。
+- **解决**:脚本作者必须在每个 `video_start` 前(除第一个外)显式插入 navigate + 重新登录(如果是有状态的 SPA)或 navigate 到目标 URL(如果是无状态的)。
+- **opt-in 自动重新导航**:脚本顶层加 `"reopen_page_after_video": true` 可让 recorder 自动把新 page `goto` 回录制时的 URL。**默认 false**。对 Vue/React 这类把登录态放在内存的 SPA 无效(刷新丢登录),但对纯静态页 / 用 cookie 鉴权的项目有用。
+
+### 16.3 多元素 selector 直接抛 strict-mode 异常
+
+`{ "selector": ".task-item" }` 在 3 条任务上 → Playwright `Locator.wait_for` 抛 "strict mode violation: resolved to 3 elements"。
+
+✅ 解决:加 `:first-child` / `:nth-of-type(1)` / 用更具体路径,或用 placeholder / aria-label 等唯一属性。  
+❌ 反例:依赖"页面上只有 1 个"的可数 selector,加新数据后立刻炸。
+
+### 16.4 视频产物路径是 `<domain>/<name>/<name>.mp4`,**不是** `<domain>/<name>.mp4`
+
+录制器为每个 `video` 创建子目录存切片 → 合并后的 `mp4` 落在子目录里:
+
+```
+screenshots/sys/login-flow/login-flow.mp4     ← 正确
+screenshots/sys/login-flow.mp4                ← 错误,validator 会报 missing
+```
+
+LLM 写 `[VIDEO: title](path)` 时**必须**含子目录。同理 `narration.mp3` 在 `<domain>/<name>.narration.mp3` 顶层。
+
+### 16.5 截图 selector 跨页面要重新加 `wait_for`
+
+`video_start` 之后第一个交互 step 前**必须**有 `wait_for` 等待目标元素 visible。视频录制过程中 Playwright 会切换 page / 重置 z-index,新 page 上元素可能还在 DOM 但不可见。
+
+### 16.6 `apply-mapping` 后的 path 必须是相对于 .md 文件的
+
+Manual 在 `docs/user-manual/manual/<name>.md`,asset 在 `docs/user-manual/screenshots/<domain>/<name>.png`。
+正确的相对 path:`../screenshots/<domain>/<name>.png`(从 manual/ 出发上 1 级再到 screenshots/)。
+
+❌ 错误:`screenshots/<domain>/<name>.png`(validator 会去 `manual/screenshots/...` 找)  
+❌ 错误:`<domain>/<name>.png`(validator 会去 `manual/<domain>/...` 找)  
+✅ 正确:`../screenshots/<domain>/<name>.png`
+
+### 16.7 `build-standalone` 的 `data:` URL 内联要求
+
+`_inline_assets_to_data_urls`(v1.0.2 起)会把 image / video 文件 base64 内联进 `user-manual-standalone.html`,这样 `file://` 双击能直接打开。**前提**:manual 里的 image / video path 必须能在 disk 上找到对应文件。路径错(16.6)→ 内联失败 → 浏览器看到 `<img src=missing>` 破图。
+
+v1.0.2 起的 inliner 三层:
+1. `![alt](path)` 形式的图片
+2. `<source src=...>` / `<video src=...>` / `<img src=...>` HTML 标签
+3. `[VIDEO: title](path.mp4)` 形式的 markdown 引用 ← v0.3.3 修复:之前只覆盖第 2 层,template 的 `convertVideoLinksInMd` 在浏览器里才转 `<video>`,内联跑在前面,赶不上。
+
+### 16.8 validator 算 screenshot / video 文件存在时只用 path,不查 candidate
+
+`validate-output.py` 第 7 项严格按 `(md_dir / ref).resolve()` 检查,不会去 `_candidate_paths_for_placeholder` 那一堆 fallback。LLM 写 manual 时**必须**严格按 16.6 的 path 规则,不要写"凭直觉能用就行"的相对 path。

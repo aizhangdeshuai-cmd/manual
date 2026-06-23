@@ -1607,6 +1607,24 @@ def _inline_assets_to_data_urls(text, md_path):
         r"<(?:source|video|img)\b[^>]*?\bsrc=\"[^\"]+\"[^>]*>",
         _tag, text,
     )
+
+    # 3) v1.0.2 fix: [VIDEO: title](path.mp4) markdown refs. The template
+    # converts these to <video><source src="path"> at runtime in the
+    # browser, AFTER the inliner runs. If we don't catch them here, the
+    # resulting HTML has <source src="path.mp4"> with a relative path
+    # that file:// refuses to load → video shows as broken player.
+    def _md_video(m):
+        prefix_b, alt, paren_b, src, paren_e = (
+            m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)
+        )
+        data_url = _resolve(src)
+        if data_url is None:
+            return m.group(0)
+        return prefix_b + alt + paren_b + data_url + paren_e
+    text = _ire.sub(
+        r"(\[VIDEO:\s*)([^\]]*)(\]\()([^\s)]+\.(?:mp4|webm|mov))(\))",
+        _md_video, text,
+    )
     return text
 
 

@@ -183,21 +183,26 @@ async def _handle_ai_annotate(
 async def _handle_video_start(rec: Recorder, step: dict, name_to_path: dict) -> None:
     # v0.2.1: remember the current page so _handle_video_stop can close it
     # to flush Playwright's webm to rec_dir.
+    # v0.3.3: also remember the page URL so _handle_video_stop can re-navigate
+    # the fresh page back to the same URL (otherwise the new page opens at
+    # about:blank and every step after this video_stop fails).
     name = _to_kebab(step["name"])
+    try:
+        recording_url = rec.page.url
+    except Exception:
+        recording_url = ""
     name_to_path[f"_video_{name}"] = {
         "started_at": time.monotonic(),
-        # v0.2.4 audit round 3 (C3): also record wall-clock start time
-        # so _handle_video_stop can filter out webms from previous
-        # sessions (back-to-back video_start/video_stop in the same
-        # script). monotonic() is for duration math; we need wall time
-        # to compare against file mtimes.
         "started_wall": time.time(),
         "recording_page": rec.page,
+        "recording_url": recording_url,
+        "base_url": rec._last_base_url,
     }
 
 
 async def _handle_video_stop(
-    rec: Recorder, step: dict, name_to_path: dict, output_dir: Path
+    rec: Recorder, step: dict, name_to_path: dict, output_dir: Path,
+    *, reopen_after_video: bool = False,
 ) -> AssetRef:
     """v0.2.1: slice the recorded webm, concat into one MP4, return reference.
 
@@ -276,11 +281,35 @@ async def _handle_video_stop(
         )
 
     # Open a fresh page on the same context for any subsequent steps.
+    # v0.3.3: re-navigate the fresh page to the URL that was active during
+    # recording. Without this, the new page opens at about:blank and every
+    # step after this video_stop fails (wait_for, click, type, screenshot
+    # all target elements that no longer exist). Fall back to the script
+    # root URL if we somehow lost the recording URL.
+    new_page = None
     try:
         new_page = await rec.context.new_page()
         rec._page = new_page
     except Exception:
         pass
+    # v0.3.3: opt-in re-navigation. See reopen_page_after_video docstring
+    # in run_script. Default is OFF — the script author is expected to
+    # `navigate` explicitly between videos. When ON, the fresh page is
+    # re-pointed at the URL that was active during recording.
+    if reopen_after_video and new_page is not None:
+        target_url = session.get("recording_url", "") if isinstance(session, dict) else ""
+        base_url = session.get("base_url", "") if isinstance(session, dict) else ""
+        if target_url and target_url != "about:blank":
+            try:
+                from urllib.parse import urljoin
+                full = urljoin(base_url, target_url) if base_url else target_url
+                await new_page.goto(full, wait_until="domcontentloaded")
+            except Exception as e:
+                print(
+                    f"WARNING: video_stop re-navigate to {target_url!r} failed "
+                    f"({type(e).__name__}: {e}); subsequent steps may fail.",
+                    file=sys.stderr,
+                )
 
     return asset
 
@@ -476,6 +505,14 @@ async def run_script(script_path: Path) -> dict:
     upload_hints: list[dict] = []
 
     name_to_path: dict[str, Any] = {}
+    # v0.3.3: opt-in auto re-navigation after video_stop. Default False —
+    # the script author must explicitly `navigate` to the right URL between
+    # videos. Setting `reopen_page_after_video: true` in the script makes
+    # the recorder capture the recording URL and replay it on the fresh
+    # page that replaces the closed recording page. Useful for stateless
+    # apps (public marketing pages) but harmful for stateful apps
+    # (Vue/React SPAs that lose in-memory auth on reload).
+    reopen_after_video = bool(data.get("reopen_page_after_video", False))
 
     pending_annotations: list[dict] = []
     async with Recorder(
@@ -546,7 +583,7 @@ async def run_script(script_path: Path) -> dict:
                             "reason": "video session already validated; reused",
                         })
                         continue
-                    asset = await _handle_video_stop(rec, step, name_to_path, output_dir)
+                    asset = await _handle_video_stop(rec, step, name_to_path, output_dir, reopen_after_video=reopen_after_video)
                     # v0.3.2: optional narration. If the video_stop step carries
                     # `narration` (a list of strings, one per step), synthesize each
                     # segment, concatenate with gaps, then mux onto the recorded

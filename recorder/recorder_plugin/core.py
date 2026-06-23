@@ -71,6 +71,10 @@ class Recorder:
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
+        # v0.3.3: track the most recent absolute base URL so _handle_video_stop
+        # can re-navigate the post-close fresh page using urljoin. Set on
+        # every Recorder.navigate().
+        self._last_base_url: str = ""
 
     async def __aenter__(self) -> "Recorder":
         await self.start()
@@ -119,7 +123,19 @@ class Recorder:
         return self._context
 
     async def navigate(self, url: str, wait_until: str = "domcontentloaded") -> None:
-        await self.page.goto(url, wait_until=wait_until)
+        # v0.3.3: Playwright does NOT resolve relative URLs (it errors with
+        # "Cannot navigate to invalid URL"). urljoin against the last
+        # absolute URL the recorder visited to support "go to /settings" etc.
+        from urllib.parse import urljoin
+        abs_url = urljoin(self._last_base_url, url) if self._last_base_url else url
+        if not (abs_url.startswith("http://") or abs_url.startswith("https://")
+                or abs_url.startswith("file://") or abs_url.startswith("about:")):
+            raise ValueError(
+                f"Recorder.navigate: cannot resolve {url!r} to an absolute URL; "
+                f"first navigate must be absolute (got last_base_url={self._last_base_url!r})"
+            )
+        await self.page.goto(abs_url, wait_until=wait_until)
+        self._last_base_url = abs_url
 
     async def screenshot(self, name: str, annotate: list | None, mask: list | None, output_path: Path) -> AssetRef:
         path = Path(output_path)
