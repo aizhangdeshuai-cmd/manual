@@ -142,7 +142,8 @@ class ValidateOutputTests(unittest.TestCase):
             # exist on disk), so the file-level ok is False.
             self.assertFalse(data[0]["ok"])
             # v0.3.1: 7 checks now (was 6).
-            self.assertEqual(len(data[0]["checks"]), 7)
+            # v0.5.4: 8 checks now (added placeholder_alt).
+            self.assertEqual(len(data[0]["checks"]), 8)
             names = [c["name"] for c in data[0]["checks"]]
             self.assertIn("screenshot files exist", names)
         finally:
@@ -285,6 +286,35 @@ class ValidateOutputTests(unittest.TestCase):
             self.assertTrue(old_check["ok"])
             # But the file-level ok is now False (one check failed)
             self.assertFalse(data[0]["ok"])
+    def test_placeholder_alt_flags_lazy_alt_text(self):
+        """v0.5.4: detect LLM-lazy alt patterns (占位:/<TODO:>/system screenshot/description)."""
+        with tempfile.TemporaryDirectory() as d:
+            # Create real PNG files for the markdown to reference
+            for name in ("good.png", "lazy1.png", "lazy2.png", "lazy3.png", "lazy4.png"):
+                (Path(d) / name).write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 200)
+            md = Path(d) / "lazy.md"
+            md.write_text(
+                "# Manual\n\n"
+                "![红框:点保存](good.png)\n"  # OK
+                "![占位:指标列表](lazy1.png)\n"  # 占位: stub
+                "![<TODO: alt>](lazy2.png)\n"  # TODO stub
+                "![系统截图](lazy3.png)\n"  # generic word
+                "![详情页面截图,显示了所有字段](lazy4.png)\n"  # description-style
+            )
+            r = run(["--json", str(md)])
+            self.assertEqual(r.returncode, 0, msg=r.stderr)
+            data = json.loads(r.stdout)
+            checks = {c["name"]: c for c in data[0]["checks"]}
+            self.assertIn("placeholder_alt (lazy alt-text)", checks)
+            alt = checks["placeholder_alt (lazy alt-text)"]
+            self.assertEqual(alt["hits"], 5)
+            self.assertEqual(alt["flagged"], 4)
+            self.assertFalse(alt["ok"])
+            offenders = alt["offenders"]
+            self.assertEqual(len(offenders), 4)
+            # First offender is the 占位: one
+            self.assertTrue(offenders[0]["alt"].startswith("占位"))
+
 
     def test_screenshot_files_exist_human_output_shows_missing(self):
         """v0.3.1: human-form output should show present/total + missing

@@ -122,6 +122,60 @@ def _extract_unreplaced_placeholders(text: str) -> list[dict]:
     return out
 
 
+# v0.5.4: extract just the alt text from an `![alt](path)` markdown
+# image link. Used by the placeholder_alt check to look for LLM-lazy
+# alt patterns (占位:/TODO:/img*/screenshot/etc).
+ALT_RE = re.compile(
+    r"!\[(?P<alt>[^\]]*)\]\((?P<path>[^)]+\.(?:png|jpg|jpeg|webp)(?:\?[^)]*)?)\)",
+    re.IGNORECASE,
+)
+
+# v0.5.4: alt-text forbidden patterns. Each tuple is
+# (regex, human-readable reason). Match = LLM wrote a lazy alt that
+# the LLM agent produced without actually viewing the page.
+# v0.5.4 §2.2 hard rule: LLM must NOT emit “占位:...” style
+# alts; instead either write a real description OR remove the link.
+_ALT_FORBIDDEN_PATTERNS = [
+    (re.compile("^\\s*占位[:：]"), "alt starts with placeholder (LLM lazy stub)"),
+    (re.compile("^\\s*<TODO[:：]", re.IGNORECASE), "alt is a <TODO: ...> stub"),
+    (re.compile("^\\s*(screenshot|img\\d*|系统截图|截图|页面截图)\\s*$", re.IGNORECASE), "alt is a generic placeholder word"),
+    (re.compile("详情页面|详情|这个页面|包含", re.IGNORECASE), "alt is a description-style sentence (> 15 chars prose)"),
+]
+
+
+def _check_placeholder_alt(text: str) -> dict:
+    """v0.5.4: detect lazy alt text patterns. LLM agents that don't
+    run the recorder (or run it on a blocked dev server) tend to
+    emit “占位:指标列表” style alts. These
+    are LLM-generated stubs, not real captions — readers get
+    zero information from them. SKILL.md §2.2 explicitly bans them.
+
+    Returns a check-shaped dict with:
+      - hits: number of image links scanned
+      - flagged: count of links matching any forbidden pattern
+      - offenders: list of {alt, path, reason} for the first 5
+    """
+    offenders: list[dict] = []
+    hits = 0
+    for m in ALT_RE.finditer(text):
+        alt = m.group("alt").strip()
+        path = m.group("path").strip()
+        hits += 1
+        for pat, reason in _ALT_FORBIDDEN_PATTERNS:
+            if pat.search(alt):
+                offenders.append({"alt": alt, "path": path, "reason": reason})
+                break
+    return {
+        "name": "placeholder_alt (lazy alt-text)",
+        "hits": hits,
+        "threshold": hits,
+        "comparison": "eq",
+        "ok": (len(offenders) == 0),
+        "flagged": len(offenders),
+        "offenders": offenders[:5],
+    }
+
+
 def _is_placeholder_png(path: Path) -> bool:
     """v0.3.2: a PNG file is a 'placeholder' if its dimensions are < 50x50.
     Real screenshots are 1280x800+; 1×1 or 32×32 etc. means the LLM
@@ -359,6 +413,20 @@ def validate_file(path):
         "unreplaced_placeholder_count": file_check["unreplaced_placeholder_count"],
     })
     all_ok = all_ok and file_check["ok"]
+    # v0.5.4: placeholder_alt check (lazy alt-text pattern). File-existence
+    # check covers the file side; this covers the markdown side. Together
+    # they catch both “file not on disk” and “file on disk but alt is LLM garbage”.
+    alt_check = _check_placeholder_alt(text)
+    results.append({
+        "name": alt_check["name"],
+        "hits": alt_check["hits"],
+        "threshold": alt_check["threshold"],
+        "comparison": alt_check["comparison"],
+        "ok": alt_check["ok"],
+        "flagged": alt_check["flagged"],
+        "offenders": alt_check["offenders"],
+    })
+    all_ok = all_ok and alt_check["ok"]
     # v0.4.0: opt-in unique-content check. Pop a module-level flag
     # (set by main from --unique) so test harnesses can override.
     if globals().get("UNIQUE_CHECK_ENABLED"):

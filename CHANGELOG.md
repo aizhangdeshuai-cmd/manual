@@ -4,6 +4,70 @@ Top-level changelog for the user-manual skill. The recorder opt-in
 plugin (`recorder/`) has its own changelog at `recorder/CHANGELOG.md` —
 versioned in lockstep with the main skill.
 
+## 0.5.4 (2026-06-23) — 草稿不再当成品: skip-mode 待补资产清单 + alt 禁橢模式 + 硬门
+
+Audit of grc project (2026-06-23) showed that v0.5.3-stamped manuals
+were delivered as “finished” while still full of broken
+`![占位:...]` references and 100% missing image files. Root
+cause: the skill’s preflight checks treated URL-unreachable as
+WARN, the alt-text had no anti-pattern gate, and §5.4’s bash
+checks didn’t actually run `validate-output.py --strict` (which is
+the only one that catches missing files). v0.5.4 closes all three
+loopholes with one rule: **a manual with placeholders is not
+finished** — either record, or write a `待补资产清单` section.
+
+### What changed
+
+1. **P2-A: §14 `skip` mode now mandates `待补资产清卑` section.**
+   When the LLM agent picks option 3 (skip recording), the manual
+   MUST end with `## 待补资产清单` listing every
+   unreplaced `[SCREENSHOT:]`, `[VIDEO:]`, `![占位:...](path)`
+   reference. `validate-output.py --strict` will FAIL the manual
+   otherwise. The agent must also surface this in its final reply.
+
+2. **P2-B: §2.2 alt 禁橢模式 + `validate-output.py` 8th check.**
+   Added `_check_placeholder_alt` to `scripts/validate-output.py`:
+   it scans all `![占位:...]` / `![<TODO: ...>]` /
+   `![系统截图]` / description-style alts and flags
+   them. SKILL.md §2.2 hard rule updated with the 4 forbidden
+   patterns. §5.4 bash 验证 6 now also runs the same check
+   inline so LLMs running only the bash gate also catch it.
+
+3. **P2-C: `--allow-blocked` flag on `record-and-replace`.**
+   v0.4.0 made URL-unreachable a WARN, which LLMs ignored. v0.5.4
+   makes it a hard FAIL with an explicit next-step menu
+   (start dev server / pass --allow-blocked / switch to skip mode).
+   The new `--allow-blocked` flag downgrades the FAIL to WARN so
+   the agent can deliberately write a draft manual. The draft
+   must then include `§14 选项 3” 待补资产清单”.
+
+4. **P2-D: §5.4 “double-gate” hard rule.** The bash 7 项
+   (任务卡格式与内容质量) and
+   `validate-output.py --strict` (文件系统 + alt 质量)
+   are BOTH required to exit 0 before the LLM can claim the manual
+   is complete. The agent must paste the `hits=N/threshold=M` numbers
+   in its final reply / commit message.
+
+### Why
+
+The v0.5.0–v0.5.3 skill let an LLM agent produce 5 manuals with
+**98 broken image refs** and call them done. v0.5.4 makes that
+impossible: either record (placeholders become real files), or
+declare a draft (the `待补资产清单` section
+makes the gap explicit and blocks validate-output from passing).
+The grc project’s existing manuals are still drafts; they need a
+re-run of the skill to pick up the new gates.
+
+### Tests
+
+- 272/272 pass (133 scripts + 139 recorder unit; +1 vs v0.5.3 for
+  the new `test_placeholder_alt_flags_lazy_alt_text`).
+- Manual probes:
+  - 4 forbidden alt patterns all caught by `_check_placeholder_alt`
+  - `record-and-replace --allow-blocked` continues past preflight FAIL
+  - `record-and-replace` without flag exits 2 with explicit menu
+  - §5.4 bash 验证 6 catches `占位:` alts in addition to validate-output.py
+
 ## 0.5.3 (2026-06-23) — audit fix pass: regex + null host + narration type
 
 Three P1 bugs surfaced by independent skill review on 2026-06-23:

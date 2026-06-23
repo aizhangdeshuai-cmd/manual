@@ -2025,7 +2025,11 @@ def cmd_record_and_replace(args: list[str]) -> int:
             "usage: record-and-replace <manual.md> [--script <recorder.json>]\n"
             "       [--auto-generate-script] [--dry-run] [--skip-validate]\n"
             "       [--skip-viewer-regen]\n"
-            "       [--skip-script-check] [--target-url URL]\n\n"
+            "       [--skip-script-check] [--target-url URL]\n"
+            "       [--allow-blocked]\n\n"
+            "v0.5.4: --allow-blocked turns preflight FAIL into WARN so\n"
+            "you can write a draft manual even if dev server is down.\n"
+            "Manual must then end with \'## 待补资产清单\' section.\n\n"
             "One-shot: pre-flight check -> run recorder -> apply mapping ->\n"
             "validate. Replaces the 5-step SKILL.md §14 workflow.\n"
             "v0.5.0: --auto-generate-script builds a v0.5.0 template from\n"
@@ -2044,6 +2048,7 @@ def cmd_record_and_replace(args: list[str]) -> int:
     skip_validate = False
     skip_viewer_regen = False
     target_url = None
+    allow_blocked = False
     i = 0
     while i < len(args):
         a = args[i]
@@ -2070,6 +2075,16 @@ def cmd_record_and_replace(args: list[str]) -> int:
             # v0.5.0: opt out of auto-regenerating user-manual.html
             # after record-and-replace. For CI / pinned-viewer envs.
             skip_viewer_regen = True
+            i += 1
+        elif a == "--allow-blocked":
+            # v0.5.4: preflight FAIL (e.g. dev server unreachable)
+            # becomes a WARN, command continues. The user has
+            # acknowledged the manual will be a draft. Per SKILL.md
+            # §14 option 3, the manual MUST end with
+            # "## 待补资产清单" section listing
+            # the unreplaced placeholders, otherwise
+            # validate-output.py --strict will fail it.
+            allow_blocked = True
             i += 1
         elif not a.startswith("--") and manual_path is None:
             manual_path = Path(a)
@@ -2157,9 +2172,24 @@ def cmd_record_and_replace(args: list[str]) -> int:
     for line in preflight_msgs:
         print(f"  {line}", file=sys.stderr)
     if not preflight_ok:
-        print("", file=sys.stderr)
-        print("❌ pre-flight FAILED — fix the issues above and retry.", file=sys.stderr)
-        return 2
+        if allow_blocked:
+            # v0.5.4: user has explicitly opted into a draft. Continue
+            # with WARN. The manual will end up full of placeholders;
+            # it must self-document them via §14 option 3
+            # (“## 待补资产清单”), or
+            # validate-output.py --strict will reject it.
+            print("", file=sys.stderr)
+            print("⚠️  pre-flight FAILED but --allow-blocked set; continuing as draft.",
+                  file=sys.stderr)
+            print("   (the manual must end with “## 待补资产清单”)",
+                  file=sys.stderr)
+        else:
+            print("", file=sys.stderr)
+            print("❌ pre-flight FAILED — fix the issues above and retry.", file=sys.stderr)
+            print("   Or pass --allow-blocked to write a draft manual anyway", file=sys.stderr)
+            print("   (the manual must then end with “## 待补资产清单”).",
+                  file=sys.stderr)
+            return 2
 
     if dry_run:
         # Build the mapping preview without actually recording

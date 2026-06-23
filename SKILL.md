@@ -100,6 +100,14 @@ Both cases use the same routine; the existing-manual case skips artifacts whose 
 - "X 变红 / 变灰 / 出现红叉"(异常反馈)
 - "弹出一个窗口 / 抽屉 / 全屏"(UI 形态)
 
+**v0.5.4: alt 文本禁止模式**(遇到 LLM 会完量跳过):
+- ❌ `占位:指标列表` / `占位:新增` / `占位:表单` — LLM 看到截图不在事就用“占位:”拼出来的冗余 alt,同事资产应直接不写这个引用(或者走 skip 模式 → 待补资产清单)
+- ❌ `系统截图` / `screenshot` / `img1` — 沉默占位,要么补出真实地位描述,要么删除引用
+- ❌ `这个页面显示了 X` / `详情页面截图包含 Y` — 描述式 alt(上面 §2.2 反例),> 15 字
+- ❌ alt 直接拷负文件名 `指标列表.png` — 读画面的人看不懂
+
+`validate-output.py --strict` 在 v0.5.4 会检查上述禁止模式(匹配上述 4 种兴行),出现任一个则报 `placeholder_alt` 与代。
+
 ### 2.3 "操作前必看"前置块
 
 **每张任务卡开头**必须有一段 `> ⚠️ 操作前必看` 块,放操作前用户需要知道的事:
@@ -452,7 +460,17 @@ narration_rate: "+0%"  # 可选,语速调节
 > - [ ] 没有任何未替换的 `[SCREENSHOT: xxx.png]` / `[VIDEO: xxx.mp4]` 占位
 > - [x] **必跑** `python3 -m manual_helper fill-citation-shas <this.md>` 把 `(auto)` 替换成真 SHA(不跑则 validate FAIL)
 >
-> 跑完：`python3 scripts/validate-output.py docs/user-manual/manual/<name>.md --strict` — 必须 exit 0。
+> 跑完两套检查(都必须 exit 0):
+
+```bash
+# 检查 1: §5.4 手写 bash 7 项(任务卡格式)
+bash §5.4 里的 bash 脚本 docs/user-manual/manual/<name>.md
+
+# 检查 2: validate-output.py §8 项(含本地文件系统 + placeholder_alt)
+python3 scripts/validate-output.py docs/user-manual/manual/<name>.md --strict
+```
+
+**v0.5.4 硬门**: 任一个 FAIL 都不能宣布手册完成。LLM 代理人在 commit 前 **必须**把两个检查的输出(含 `hits=N/threshold=M` 数字)贴到 commit message 或 输出里。`validate-output.py --strict` 走 `placeholder_alt` 会报 grc 项目那 98 个 `占位:` alt(§2.2 禁止模式) — 这些是 LLM 代理人 “草稿当成品” 的典型忠冲。
 
 ```markdown
 ### 任务卡 1: <动词开头任务名,如"创建新员工账号">
@@ -608,6 +626,10 @@ PERMS=$(grep -c "## 角色与权限速查" "$F")
 # 验证 6:截图图说(每分册 ≥ 2 张带 alt 的图片)
 SHOTS=$(grep -c '!\[' "$F")
 [ "$SHOTS" -ge 2 ] || { echo "WARN: 截图 < 2"; }
+
+# v0.5.4: alt 禁止模式 §2.2 硬规则(同步到 validate-output.py 的 placeholder_alt 检查)
+LAZY=$(grep -cE '!\[\s*(占位[:：]|<TODO|screenshot|img[0-9]*|\u7cfb\u7edf\u622a\u56fe)\]' "$F" 2>/dev/null || echo 0)
+[ "$LAZY" -eq 0 ] || { echo "FAIL: alt 出现懒颜色 4 种禁止模式之一(§2.2),$LAZY 条详见 validate-output.py placeholder_alt"; exit 1; }
 
 # 验证 7(v0.3.2): Citations SHA256 必须已填,不能再有 (auto) 占位
 AUTO=$(grep -c "(auto)" "$F")
@@ -787,6 +809,8 @@ The LLM agent must ask the user **once** which mode to use, with a default of "r
 2. **`screenshot-only`** — record screenshots but skip video. Lighter, faster.
 3. **`skip`** — leave the placeholders in place. User will fill them later by hand or with another tool.
 
+   ⚠️ **v0.5.4 hard rule (skip mode)**: if the LLM agent picks `skip`, the resulting manual **MUST** end with a `## 待补资产清单` section that lists every unreplaced `[SCREENSHOT: x]` / `[VIDEO: x]` / `![占位:...](path.png)` reference (one per line, with the manual-relative path). `validate-output.py --strict` will fail the manual if this section is missing **or** the listed paths don't match the actual missing assets. The user is opting into a draft, and a draft is only valid if it self-documents what's missing. The LLM agent must also surface this in its final reply ("手册草稿，N 个截图/视频待补，路径如下").
+
 ### Workflow (mode = `record` or `screenshot-only`)
 
 ```
@@ -835,7 +859,10 @@ The LLM agent must ask the user **once** which mode to use, with a default of "r
    #   with ![x](path) markdown
    # → prints "replaced: N placeholders, placeholders still missing: M"
    # → if M > 0, the agent must decide: re-run recorder for missing, or
-   #   accept the gap (call them out in the manual's "Open Questions" section)
+   #   accept the gap. **v0.5.4**: accepting the gap is only valid in
+   #   `skip` mode AND requires the `## 待补资产清单` section
+   #   (see option 3 above). `validate-output.py --strict` will FAIL the
+   #   manual otherwise.
 ```
 
 ### Helper subcommand reference
