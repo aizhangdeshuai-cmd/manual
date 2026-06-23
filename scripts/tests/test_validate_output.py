@@ -60,6 +60,27 @@ GOOD = """\
 ### 相关任务
 参见 X。
 
+### 任务卡 1: 测试任务卡
+
+> ⚠️ **操作前必看**
+> - 必须登录
+
+#### 步骤
+1. 打开页面
+2. 点击按钮
+
+#### 成功后看到
+- 成功提示
+
+## 目录
+- [适用角色](#适用角色)
+- [前置条件](#前置条件)
+- [操作前必看](#操作前必看)
+- [步骤](#步骤)
+- [成功后看到](#成功后看到)
+- [字段说明](#字段说明)
+- [角色与权限速查](#角色与权限速查)
+
 ## 角色与权限速查
 | 模块 | 角色 | 读 | 写 | 删 | 备注 |
 | --- | --- | --- | --- | --- | --- |
@@ -96,14 +117,18 @@ class ValidateOutputTests(unittest.TestCase):
             self.assertEqual(r.returncode, 0, msg=r.stdout + r.stderr)
             self.assertIn("[OK", r.stdout)
             for needle in (
-                "7-field hits=12",
-                "操作前必看 blocks=3",
-                "visual anchors=3",
+                "7-field hits=21",  # v1.0.1: 目录 + new 任务卡 1 fixture
+                "操作前必看 blocks=6",  # v1.0.1: 目录 (2) + new task card (1) added to original 3
+                "visual anchors=4",  # v1.0.1: new task card adds ⚠️
                 "appendix-A 6-col table=2",
                 "role-permission matrix=1",
                 "screenshot count=2",
                 # v0.3.1: new file-existence check rendered as present/total
                 "screenshot files exist=2/2",
+                # v1.0.1: directory_anchors check
+                "directory_anchors (§3 row 4 hard gate)=7",
+                # v1.0.1: task_card_headings check
+                "task_card_headings (§4 strict format)=1",
             ):
                 self.assertIn(needle, r.stdout, msg="missing " + needle)
 
@@ -143,7 +168,9 @@ class ValidateOutputTests(unittest.TestCase):
             self.assertFalse(data[0]["ok"])
             # v0.3.1: 7 checks now (was 6).
             # v0.5.4: 8 checks now (added placeholder_alt).
-            self.assertEqual(len(data[0]["checks"]), 8)
+            # v1.0.1: 9 checks now (added directory_anchors).
+            # v1.0.1: 10 checks now (added task_card_headings).
+            self.assertEqual(len(data[0]["checks"]), 10)
             names = [c["name"] for c in data[0]["checks"]]
             self.assertIn("screenshot files exist", names)
         finally:

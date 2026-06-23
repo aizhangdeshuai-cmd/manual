@@ -1499,6 +1499,34 @@ def _slugify_for_id(name: str) -> str:
     return safe
 
 
+
+def _convert_video_links_to_html(text: str) -> str:
+    """v1.0.1: convert markdown `[VIDEO: title](path.mp4)` to
+    a playable HTML5 `<video controls>` element. Mirrors the
+    runtime `convertVideoLinksInMd()` in templates/user-manual.html
+    so that build-standalone output contains the <video> tag
+    literally (no JS required to see the player).
+    """
+    import re as _re
+    pat = _re.compile(
+        r'\[VIDEO:\s*([^\]]+)\]\(([^)\s]+\.(?:mp4|webm|mov))'
+        r'(\s+"[^"]*")?\)',
+        _re.IGNORECASE,
+    )
+    def _sub(m):
+        alt = m.group(1).replace('"', "&quot;")
+        src = m.group(2)
+        return (
+            '<video controls preload="metadata" playsinline '
+            'style="max-width:100%;height:auto;display:block;margin:8px 0">'
+            f'<source src="{src}" type="video/mp4">'
+            '\u672a\u652f\u6301\u89c6\u9891\u6807\u7b7e'
+            '</video>'
+        )
+    return pat.sub(_sub, text)
+
+
+
 def build_standalone(html_template_path: Path, html_out_path: Path, md_paths: list[Path]) -> Path:
     """Read the html template, inline all .md files as <script> blocks, write out.
 
@@ -1528,6 +1556,11 @@ def build_standalone(html_template_path: Path, html_out_path: Path, md_paths: li
             text = p.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             text = p.read_text(encoding="utf-8", errors="replace")
+        # v1.0.1: pre-render [VIDEO: x](path) -> <video> so the
+        # build-standalone output has the <video> tag literally
+        # (no JS needed to see the player). Mirrors the runtime
+        # convertVideoLinksInMd() in the viewer template.
+        text = _convert_video_links_to_html(text)
         # Escape </script> to avoid breaking out of the script tag
         text = text.replace("</script>", "<\\/script>")
         sid = _slugify_for_id(p.name)

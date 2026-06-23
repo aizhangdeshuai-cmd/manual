@@ -654,7 +654,7 @@
       pendingChunks = [];
       renderedChunkIds = new Set();
       if (window.marked && window.marked.lexer) {
-        const tokens = window.marked.lexer(cleanText);
+        const tokens = window.marked.lexer(convertVideoLinksInMd(cleanText));
         const { pre, chunks } = splitByH2(tokens);
         const preambleHtml = renderPreamble(pre);
         // 第一个 chunk 立即渲染, 其余挂占位
@@ -1066,6 +1066,32 @@
     return trimmed.slice(end + 4).replace(/^\n+/, "");
   }
 
+  // v1.0.1: Convert markdown `[VIDEO: title](path.mp4)` to a
+  // playable HTML5 <video controls> element. Without this, the
+  // viewer only saw the raw markdown text (link to the file, not
+  // an embedded player). Now: every task card with a video
+  // reference renders a real <video> tag.
+  //
+  // Regex: `[VIDEO: <alt>](<path>)`  (the alt may contain
+  // non-bracket chars including spaces and Chinese; the path
+  // ends in .mp4 / .webm / .mov).
+  function convertVideoLinksInMd(md) {
+    return md.replace(
+      /\[VIDEO:\s*([^\]]+)\]\(([^)\s]+\.(?:mp4|webm|mov))(\s+"[^"]*")?\)/g,
+      (m, alt, src) => {
+        // Escape alt for the title attribute (and visible label).
+        const safeAlt = alt.replace(/"/g, "&quot;");
+        return (
+          '<video controls preload="metadata" playsinline ' +
+          'style="max-width:100%;height:auto;display:block;margin:8px 0">' +
+          '<source src="' + src + '" type="video/mp4">' +
+          '\u672a\u652f\u6301\u89c6\u9891\u6807\u7b7e' /* "video tag not supported" */ +
+          '</video>'
+        );
+      }
+    );
+  }
+
   // -------- Index loading --------
   // Order: api config (db mode) > inline scripts (file:// works) > fetch manual-index.json (server mode) > null
   // 部署时手工覆盖 API base: 在 viewer 所在路径提供 <script>window.__MANUAL_API_BASE__ = "https://api.example.com";<'/script>
@@ -1185,7 +1211,7 @@
       if (!f) return;
       const text = await f.text();
       const cleanText = stripFrontmatter(text);
-      const html = window.marked ? window.marked.parse(cleanText) : escapeHtml(cleanText);
+      const html = window.marked ? window.marked.parse(convertVideoLinksInMd(cleanText)) : escapeHtml(cleanText);
       els.article.innerHTML = html;
       const title = deriveTitle(f.name);
       currentIndex = { manuals: [{ file: f.name, title, description: "Manually opened" }] };

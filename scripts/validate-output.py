@@ -143,6 +143,106 @@ _ALT_FORBIDDEN_PATTERNS = [
 ]
 
 
+# v1.0.1: detect the LLM-leaves-toc-empty failure pattern. The
+# skill says §3 row 4 requires a `## 目录` section with ≥ 5
+# anchor links. v0.5.2 documented the rule but the LLM kept
+# emitting `<!-- toc -->` placeholders or just empty headings.
+# This check finds the `## 目录` section and counts the
+# markdown anchor links under it. If < 5, fail the manual.
+_TOC_HEADING_RE = re.compile(r"^##\s*目录\s*$", re.MULTILINE)
+_TOC_ANCHOR_RE = re.compile(r"^\s*-\s+\[[^\]]+\]\([^)]+\)", re.MULTILINE)
+
+
+# v1.0.1: enforce the strict task-card heading format from
+# SKILL.md §4. The LLM keeps dropping the `任务卡 N:` prefix,
+# e.g. writing `### 创建合同` instead of
+# `### 任务卡 1: 创建合同`. This check finds
+# every H3 in the document, splits them into "task card" and "other"
+# buckets, and requires:
+#   1. The first task-card heading must be `### 任务卡 1: ...`
+#   2. Task-card numbers must be sequential (1, 2, 3, ...)
+#   3. There must be ≥ 1 task card (otherwise it's not a manual)
+_TASK_CARD_HEADING_RE = re.compile(r"^###\s+任务卡\s+(\d+):\s*(.+?)\s*$", re.MULTILINE)
+_ANY_H3_RE = re.compile(r"^###\s+(.+?)\s*$", re.MULTILINE)
+
+
+def _check_task_card_headings(text: str) -> dict:
+    """v1.0.1: §4 strict task-card heading format.
+
+    Returns a check-shaped dict with:
+      - hits: count of well-formed `任务卡 N: title` headings
+      - threshold: 1
+      - ok: ≥ 1 well-formed heading AND numbers are sequential
+      - missing_prefix_count: how many H3s lack `任务卡 N:` prefix
+      - non_sequential: list of (got, expected) tuples if gaps detected
+      - offenders: list of raw H3 lines that lack the prefix
+    """
+    well = [(int(m.group(1)), m.group(2)) for m in _TASK_CARD_HEADING_RE.finditer(text)]
+    all_h3 = [m.group(1).strip() for m in _ANY_H3_RE.finditer(text)]
+    well_titles = {title for _, title in well}
+    offenders = [h for h in all_h3 if h not in well_titles and not h.startswith("任务卡 ")]
+
+    # Check sequential numbering
+    non_sequential = []
+    expected = 1
+    for n, _ in well:
+        if n != expected:
+            non_sequential.append((n, expected))
+        expected = n + 1
+
+    ok = (len(well) >= 1 and not non_sequential)
+    return {
+        "name": "task_card_headings (§4 strict format)",
+        "hits": len(well),
+        "threshold": 1,
+        "comparison": "ge",
+        "ok": ok,
+        "well_formed_count": len(well),
+        "missing_prefix_count": len(offenders),
+        "non_sequential": non_sequential[:5],
+        "offenders": offenders[:5],
+    }
+
+
+def _check_directory_anchors(text: str) -> dict:
+    """v1.0.1: §3 row 4 hard gate. 强制 `## 目录` segment
+    contains ≥ 5 markdown anchor links of the form `- [<title>](#<anchor>)`.
+    Returns a check-shaped dict with:
+      - hits: count of anchor links under the 目录 heading
+      - threshold: 5
+      - ok: hits >= 5
+      - has_toc_heading: bool
+      - sample_links: first 3 anchor links
+    """
+    m = _TOC_HEADING_RE.search(text)
+    if not m:
+        return {
+            "name": "directory_anchors (§3 row 4 hard gate)",
+            "hits": 0,
+            "threshold": 5,
+            "comparison": "ge",
+            "ok": False,
+            "has_toc_heading": False,
+            "sample_links": [],
+            "reason": "no '## 目录' heading found",
+        }
+    # Find end of toc section: next H2 or end of file
+    after = text[m.end():]
+    next_h2 = re.search(r"^##\s+", after, re.MULTILINE)
+    toc_body = after if not next_h2 else after[:next_h2.start()]
+    links = _TOC_ANCHOR_RE.findall(toc_body)
+    return {
+        "name": "directory_anchors (§3 row 4 hard gate)",
+        "hits": len(links),
+        "threshold": 5,
+        "comparison": "ge",
+        "ok": (len(links) >= 5),
+        "has_toc_heading": True,
+        "sample_links": links[:3],
+        "reason": "" if len(links) >= 5 else f"only {len(links)} anchor links under §目录 (need ≥ 5)",
+    }
+
+
 def _check_placeholder_alt(text: str) -> dict:
     """v0.5.4: detect lazy alt text patterns. LLM agents that don't
     run the recorder (or run it on a blocked dev server) tend to
@@ -427,6 +527,38 @@ def validate_file(path):
         "offenders": alt_check["offenders"],
     })
     all_ok = all_ok and alt_check["ok"]
+    # v1.0.1: §3 row 4 hard gate. LLM kept leaving `<!-- toc -->`
+    # or empty 目录 heading. This is now a top-level check that
+    # runs alongside file-existence and placeholder_alt.
+    toc_check = _check_directory_anchors(text)
+    results.append({
+        "name": toc_check["name"],
+        "hits": toc_check["hits"],
+        "threshold": toc_check["threshold"],
+        "comparison": toc_check["comparison"],
+        "ok": toc_check["ok"],
+        "has_toc_heading": toc_check["has_toc_heading"],
+        "sample_links": toc_check["sample_links"],
+        "reason": toc_check.get("reason", ""),
+    })
+    all_ok = all_ok and toc_check["ok"]
+    # v1.0.1: §4 task-card heading strict format. Catches the
+    # pattern where the LLM writes `### 创建合同` instead
+    # of `### 任务卡 1: 创建合同`. Now
+    # enforced by validate-output — no more silent degradation.
+    tc_check = _check_task_card_headings(text)
+    results.append({
+        "name": tc_check["name"],
+        "hits": tc_check["hits"],
+        "threshold": tc_check["threshold"],
+        "comparison": tc_check["comparison"],
+        "ok": tc_check["ok"],
+        "well_formed_count": tc_check["well_formed_count"],
+        "missing_prefix_count": tc_check["missing_prefix_count"],
+        "non_sequential": tc_check["non_sequential"],
+        "offenders": tc_check["offenders"],
+    })
+    all_ok = all_ok and tc_check["ok"]
     # v0.4.0: opt-in unique-content check. Pop a module-level flag
     # (set by main from --unique) so test harnesses can override.
     if globals().get("UNIQUE_CHECK_ENABLED"):

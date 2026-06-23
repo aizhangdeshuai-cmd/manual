@@ -4,6 +4,59 @@ Top-level changelog for the user-manual skill. The recorder opt-in
 plugin (`recorder/`) has its own changelog at `recorder/CHANGELOG.md` —
 versioned in lockstep with the main skill.
 
+## 1.0.1 (2026-06-23) — hard-gate the things the LLM kept forgetting
+
+Audit of grc project (regenerated 2026-06-23 with v1.0.0) found
+three quality issues that v0.5.x documented as "rules" but the
+LLM kept ignoring. v1.0.1 promotes all three to top-level
+`validate-output.py` hard-gates so the LLM cannot silently degrade
+the deliverable.
+
+### What changed
+
+1. **P0: 视频在 viewer 中可播放** (§2.6). v1.0.0
+   declared `必须有真视频加旁白` but the
+   template never rendered the markdown `[VIDEO: x](path.mp4)`
+   form into an HTML5 `<video controls>` element — the user
+   saw dead text. v1.0.1 adds a `convertVideoLinksInMd()` step
+   in the template + a `_convert_video_links_to_html()` step in
+   `build_standalone` so the `.html` file contains real
+   `<video controls><source src="..."></video>` tags literally
+   (no JS required to see the player).
+
+2. **P1: 目录空 (§3 row 4).** v0.5.2 said
+   `§目录 必须填 5-10 个错点链接`,
+   but the LLM kept emitting `<!-- toc -->` placeholders. v1.0.1
+   adds `validate-output.py` 9th check (`directory_anchors`):
+   the `## 目录` section must contain ≥ 5
+   `- [<title>](#<anchor>)` lines, otherwise the manual FAILS.
+   SKILL.md §3 row 4 upgraded to a v1.0.1 hard-gate callout.
+
+3. **P1: 任务卡 heading 格式 (§4).** v0.5.2 said
+   `### 任务卡 N: <title>`, but the LLM kept writing
+   `### 创建合同` without the prefix. v1.0.1 adds
+   `validate-output.py` 10th check (`task_card_headings`): the
+   manual must have ≥ 1 well-formed `任务卡 N:` heading
+   AND the numbers must be sequential (1, 2, 3, ...). SKILL.md
+   §4 upgraded to a v1.0.1 hard-gate callout.
+
+### Tests
+
+- 27/27 in `scripts/tests/test_validate_output.py` pass
+  (after GOOD fixture updated to include §目录 + 任务卡 1:).
+- 86/86 in `scripts/tests/{test_validate_output,test_manual_helper,
+  test_record_manual}.py` (the 5 `test_recording_readiness.py`
+  fails predate v1.0.0 — recorder deps are installed on this host
+  so readiness is green, not yellow/red as those tests expect).
+
+### Manual probes
+
+- 5/5 grc project manuals now FAIL `validate-output.py --strict`
+  on `directory_anchors` and `task_card_headings` checks, as
+  expected (these are now hard gates, not soft guidance).
+- `build_standalone` on grc project emits 31 `<video controls>`
+  tags (vs 0 before), one per task-card video reference.
+
 ## 1.0.0 (2026-06-23) — BREAKING: drafts are no longer a deliverable
 
 **User requirement (2026-06-23)**: "运行这个技能后，生成的手册要有图片要有视频（加旁白）".
