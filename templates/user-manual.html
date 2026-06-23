@@ -689,12 +689,46 @@
   // 把 h2/h3 序列分组:h2 开启一个 group,后续 h3 收为子项;下一个 h2 开新 group
   // 默认所有 group 收起;scrollspy 命中某 h2 时,其 group 自动展开
   function buildToc() {
-    const heads = Array.from(els.article.querySelectorAll("h2, h3"));
+    // v0.5.0 fix: include H2/H3 from BOTH rendered DOM (first chunk)
+    // AND pendingChunks (lazy-rendered chunks). Previously the TOC
+    // only saw the first H2 because subsequent chunks were replaced
+    // with `<div class="chunk-placeholder">` placeholders until scrolled
+    // into view. Result: sidebar TOC showed only 1 entry ("文档说明").
+    const heads = [];
+    // (a) Real DOM headings from the first chunk
+    Array.from(els.article.querySelectorAll("h2, h3")).forEach(h => heads.push(h));
+    // (b) Virtual headings from pendingChunks: each chunk's first
+    //     H2 token becomes a placeholder anchor; we also extract any
+    //     H3 tokens that follow before the next H2.
+    if (typeof pendingChunks !== "undefined" && pendingChunks) {
+      for (const chunk of pendingChunks) {
+        const h2Tok = chunk.tokens.find(t => t.type === "heading" && t.depth === 2);
+        if (!h2Tok) continue;
+        const vh2 = document.createElement("h2");
+        vh2.id = chunk.h2id;
+        vh2.textContent = h2Tok.text || "";
+        vh2.dataset.virtual = "1";
+        heads.push(vh2);
+        // H3s between this H2 and the next H2 in the same chunk
+        let pastH2 = false;
+        for (const t of chunk.tokens) {
+          if (t.type === "heading" && t.depth === 2) { pastH2 = true; continue; }
+          if (pastH2 && t.type === "heading" && t.depth === 3) {
+            const vh3 = document.createElement("h3");
+            vh3.id = slugify(t.text) + "-pending-" + heads.length;
+            vh3.textContent = t.text || "";
+            vh3.dataset.virtual = "1";
+            heads.push(vh3);
+          }
+        }
+      }
+    }
+
     if (heads.length === 0) {
       els.tocList.innerHTML = `<li><span style="color: var(--fg-subtle); font-size: 12px; padding: 4px 8px; display: block;">暂无章节</span></li>`;
       return;
     }
-    // 给所有 heading 加 id
+    // 给所有 heading 加 id (虚拟 heading 已有 id,跳过)
     heads.forEach((h, i) => { if (!h.id) h.id = slugify(h.textContent) + "-" + i; });
 
     // 分组
@@ -735,13 +769,19 @@
         const id = details.dataset.target;
         // 该 h2 可能还在 pendingChunks, 先 force 渲染出来再跳转
         renderChunkOnDemand(id);
-        const target = document.getElementById(id);
-        if (target) {
-          target.scrollIntoView({ behavior: "smooth", block: "start" });
-          // 立即展开 + 高亮
-          details.open = true;
-          syncToggleAllLabel();
-        }
+        // v0.5.0 fix: if the TOC entry corresponds to a virtual
+        // heading (the chunk was just lazy-rendered), the original
+        // h2 element was replaced by a real one with the same id.
+        // getElementById returns whichever is still in DOM. Wait
+        // one tick for the placeholder.replaceWith to settle.
+        requestAnimationFrame(() => {
+          const target = document.getElementById(id);
+          if (target) {
+            target.scrollIntoView({ behavior: "smooth", block: "start" });
+            details.open = true;
+            syncToggleAllLabel();
+          }
+        });
       });
     });
 
@@ -754,12 +794,14 @@
         const detailsEl = a.closest(".toc-group");
         if (detailsEl) renderChunkOnDemand(detailsEl.dataset.target);
         renderChunkOnDemand(id);
-        const target = document.getElementById(id);
-        if (details) {
-          details.open = true;
-          syncToggleAllLabel();
-        }
-        if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+        requestAnimationFrame(() => {
+          const target = document.getElementById(id);
+          if (detailsEl) {
+            detailsEl.open = true;
+            syncToggleAllLabel();
+          }
+          if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
       });
     });
 

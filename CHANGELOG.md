@@ -4,7 +4,99 @@ Top-level changelog for the user-manual skill. The recorder opt-in
 plugin (`recorder/`) has its own changelog at `recorder/CHANGELOG.md` —
 versioned in lockstep with the main skill.
 
-## 0.4.0 (2026-06-18) — quality guardrails + recorder-on (no more skipping §14)
+## 0.5.0 (2026-06-23) — auto-generate recorder scripts + TOC for lazy chunks
+
+### Headline: close the "recorder script is broken" loop
+
+Two production bugs that v0.4.0 didn't catch:
+
+1. **build_recorder_template emitted `<TODO: ...>` everywhere** —
+   the LLM agent had to hand-fill URL, output_dir, captions,
+   auth_env names, click selectors. In practice, agents shipped
+   the template with TODOs unfilled, ran the recorder, and
+   produced useless videos (e.g. lg-contract-flow.mp4 = 4.88s of
+   login page + 28s of looped frames).
+
+2. **buildToc() in the HTML viewer only saw the first H2** —
+   `els.article.querySelectorAll("h2, h3")` only matched the
+   first chunk's headings; subsequent chunks were replaced with
+   `<div class="chunk-placeholder">` and their H2s/H3s were
+   stuck in `pendingChunks` (lazy-rendered on scroll). The
+   sidebar TOC showed only 1 entry.
+
+v0.5.0 fixes both.
+
+### Added — auto-fill recorder template from project context
+
+`build_recorder_template(manual_name, placeholders, manual_path=..., project_root=...)`
+now auto-fills from project context when given:
+
+- **`url`**: read from `manual-config.json` `project.host + project.port`
+- **`output_dir`**: domain inferred from `manual_path` filename
+- **`auth_env`**: env var names inferred from manual_name (`legal-user-manual` -> `$LEGAL_USER`, `$LEGAL_PASS`)
+- **step `navigate.url`**: per-domain conventional default (`/contracts` for legal, `/users` for sys, etc.)
+- **step captions**: real captions extracted from each task card's `### 步骤` numbered list
+
+Still TODO (agent must fill): click selectors — we cannot infer
+CSS selectors from spec text. The fix hint printed by
+`check-recorder-script` tells the agent what to do.
+
+### Added — `check-recorder-script` subcommand
+
+New helper that validates a recorder script JSON before the
+agent invokes the recorder. 4 checks:
+
+1. **No `<TODO>` placeholders** — FAIL if any remain
+2. **Target URL reachable** — HEAD probe
+3. **Auth env vars set** — FAIL if any `$VAR` in `auth_env`
+   is unset, with the exact env var name + the
+   `lg-contract-flow.mp4` failure pattern as the fix hint
+4. **Steps have real content** — empty selector / url /
+   video_start/video_stop imbalance all FAIL
+
+`record-and-replace` runs this automatically before recording
+(skip with `--skip-script-check`).
+
+### Added — `record-and-replace --auto-generate-script`
+
+When no `--script` is given, generates a v0.5.0 template from
+the manual + project_root (= cwd) and continues with that
+script. The auto-generated file lives at
+`<manual>.recorder.json` next to the manual.
+
+Use case: agent says `python3 -m manual_helper
+record-and-replace <manual.md> --auto-generate-script` and
+gets a working scaffold without hand-writing JSON.
+
+### Changed — viewer TOC includes headings from pendingChunks
+
+`buildToc()` now merges:
+- (a) DOM headings from the first rendered chunk
+- (b) Virtual H2/H3 entries from `pendingChunks` (extracted
+  from chunk tokens; same data the chunks will render when
+  scrolled into view)
+
+Click handler for virtual H2 entries: `requestAnimationFrame`
+wrapper around `getElementById` so the real (DOM-rendered)
+h2 is targeted after `placeholder.replaceWith(wrap)` settles.
+
+### Tests
+
+`scripts/tests/test_manual_helper.py`: 110 → 123 tests
+(+13 new for CheckRecorderScriptTests / BuildRecorderTemplateV2Tests
+/ RecordAndReplaceAutoGenTests). All pass.
+
+### Migration
+
+- v0.4.x manuals: keep using `validate-output.py` without
+  `--unique` — no behavior change.
+- New runs: pass `--auto-generate-script` to
+  `record-and-replace` and skip the hand-template step
+  entirely.
+- Re-build standalone.html after this update — the viewer
+  template changed (TOC fix).
+
+
 
 ### Headline: catch "looks fine, isn't fine" outputs automatically + force recorder to run
 

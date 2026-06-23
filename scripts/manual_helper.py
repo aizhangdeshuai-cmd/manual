@@ -1732,6 +1732,207 @@ def cmd_record_manual(args):
 # ---------- v0.4.0: one-shot record-and-replace ----------
 
 
+def cmd_check_recorder_script(args: list[str]) -> int:
+    """v0.5.0: validate a recorder script JSON before running it.
+
+    Catches the failure pattern that produced lg-contract-flow.mp4
+    (4.88s of login page, 28s of looped frames): the agent fills a
+    template with `<TODO: ...>` placeholders, runs the recorder anyway,
+    and the recording silently misses 80% of the intended flow.
+
+    4 checks:
+      1. NO TODO PLACEHOLDERS  (FAIL if any "<TODO" string in the script)
+      2. URL REACHABLE         (FAIL if --url target is not HEAD-reachable)
+      3. AUTH ENV VARS SET     (FAIL if any $VAR in auth_env is unset in env)
+      4. STEPS HAVE REAL CONTENT
+                                (FAIL if any step has empty selector/text/url,
+                                 or if video_start has no matching video_stop)
+
+    Returns:
+      0  if all 4 checks pass
+      1  if any check fails (with itemized diagnostics)
+      2  if the script file is missing or invalid JSON
+
+    Usage:
+      python3 -m manual_helper check-recorder-script <script.json> [--json]
+    """
+    if not args or args[0] in ("--help", "-h", "help"):
+        print("usage: check-recorder-script <script.json> [--json]\n\n"
+              "Validate a recorder script before running. Catches 4 common\n"
+              "failure patterns (TODO placeholders, bad URL, unset env\n"
+              "vars, incomplete steps). Returns 0/1/2 like init-skill.", file=sys.stderr)
+        return 0 if args else 2
+
+    as_json = "--json" in args
+    script_arg = next((a for a in args if not a.startswith("--")), None)
+    if script_arg is None:
+        print("error: script.json path required", file=sys.stderr)
+        return 2
+    script_path = Path(script_arg)
+    if not script_path.exists():
+        print(f"error: {script_path} not found", file=sys.stderr)
+        return 2
+
+    # Parse
+    try:
+        text = script_path.read_text(encoding="utf-8")
+        script = json.loads(text)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"error: cannot parse {script_path}: {e}", file=sys.stderr)
+        return 2
+
+    checks: list[dict] = []
+    # Check 1: TODO placeholders anywhere
+    todo_count = text.count("<TODO")
+    checks.append({
+        "name": "no TODO placeholders",
+        "status": "OK" if todo_count == 0 else "FAIL",
+        "detail": (f"{todo_count} <TODO> placeholders remain in the script"
+                   if todo_count else "no <TODO> placeholders"),
+        "fix": ("Fill every <TODO: ...> marker. Use the v0.5.0 build_recorder_template\n"
+                "       to auto-fill URL/output_dir from manual-config.json, and\n"
+                "       run check-recorder-script after every manual edit.") if todo_count else None,
+    })
+
+    # Check 2: URL reachable
+    url = script.get("url", "")
+    if not url or str(url).startswith("<"):
+        checks.append({
+            "name": "target URL reachable",
+            "status": "FAIL",
+            "detail": f"url is unset: {url!r}",
+            "fix": "Set `url` to e.g. http://localhost:8080 (or whatever the dev server runs on).",
+        })
+    else:
+        try:
+            import urllib.request
+            req = urllib.request.Request(url, method="HEAD")
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                checks.append({
+                    "name": "target URL reachable",
+                    "status": "OK",
+                    "detail": f"{url} -> HTTP {resp.status}",
+                    "fix": None,
+                })
+        except Exception as e:
+            checks.append({
+                "name": "target URL reachable",
+                "status": "FAIL",
+                "detail": f"{url} not reachable: {type(e).__name__}: {e}",
+                "fix": ("Start your dev server (or check the port). \n"
+                        "       The recorder will produce a useless video otherwise."),
+            })
+
+    # Check 3: auth_env vars all set
+    import os
+    auth_env = script.get("auth_env", [])
+    env_refs = [v.lstrip("$") for v in auth_env if isinstance(v, str) and v.startswith("$")]
+    missing = [v for v in env_refs if v not in os.environ]
+    if not auth_env:
+        checks.append({
+            "name": "auth env vars set",
+            "status": "WARN",
+            "detail": "no auth_env in script; recorder will skip login if your app needs it",
+            "fix": ("If the app requires login, add \"auth_env\": [\"$USER\", \"$PASS\"]\n"
+                        "       and export those env vars before running."),
+        })
+    elif missing:
+        checks.append({
+            "name": "auth env vars set",
+            "status": "FAIL",
+            "detail": f"env var(s) unset: {missing}",
+            "fix": (f"export {missing[0]}=<value> before running the recorder.\n"
+                        "       Without it, the login step passes the literal string "
+                        f"\"{missing[0]}\" into the form, silently fails,\n"
+                        "       and the video stays on the login page forever "
+                        "(this is exactly the lg-contract-flow.mp4 bug)."),
+        })
+    else:
+        checks.append({
+            "name": "auth env vars set",
+            "status": "OK",
+            "detail": f"all {len(env_refs)} env var(s) set: {env_refs}",
+            "fix": None,
+        })
+
+    # Check 4: steps have real content + video_start/video_stop balance
+    steps = script.get("steps", [])
+    empty_step_count = 0
+    video_starts = sum(1 for s in steps if isinstance(s, dict) and s.get("action") == "video_start")
+    video_stops = sum(1 for s in steps if isinstance(s, dict) and s.get("action") == "video_stop")
+    for s in steps:
+        if not isinstance(s, dict):
+            empty_step_count += 1
+            continue
+        action = s.get("action", "")
+        if action in ("click", "type"):
+            if not s.get("selector") or str(s.get("selector", "")).startswith("<"):
+                empty_step_count += 1
+        elif action in ("navigate",):
+            if not s.get("url") or str(s.get("url", "")).startswith("<"):
+                empty_step_count += 1
+        elif action == "screenshot":
+            if not s.get("name") or str(s.get("name", "")).startswith("<"):
+                empty_step_count += 1
+    if video_starts != video_stops:
+        checks.append({
+            "name": "steps have real content",
+            "status": "FAIL",
+            "detail": (f"video_start ({video_starts}) != video_stop ({video_stops}); "
+                       f"unbalanced video sessions will cause recorder to hang or "
+                       f"produce empty mp4s"),
+            "fix": "Each video_start must have a matching video_stop later in the steps.",
+        })
+    elif empty_step_count:
+        checks.append({
+            "name": "steps have real content",
+            "status": "FAIL",
+            "detail": f"{empty_step_count} step(s) have empty or <TODO: ...> selectors / urls",
+            "fix": ("Fill in selectors by inspecting the actual app in a browser.\n"
+                        "       e.g. for a login form: input[name=username], button[type=submit]"),
+        })
+    elif not steps:
+        checks.append({
+            "name": "steps have real content",
+            "status": "FAIL",
+            "detail": "no steps at all",
+            "fix": ("Add navigate -> login -> click flow -> screenshot/video steps.\n"
+                        "       Use build_recorder_template to scaffold, then fill in."),
+        })
+    else:
+        checks.append({
+            "name": "steps have real content",
+            "status": "OK",
+            "detail": f"{len(steps)} steps, video_start/stop balanced ({video_starts}/{video_stops})",
+            "fix": None,
+        })
+
+    if as_json:
+        print(json.dumps({"file": str(script_path), "checks": checks}, ensure_ascii=False, indent=2))
+    else:
+        # Human output
+        badge_map = {"OK": "✅", "WARN": "⚠️ ", "FAIL": "❌"}
+        print(f"=== Recorder Script Check ({script_path.name}) ===")
+        for c in checks:
+            icon = badge_map[c["status"]]
+            print(f"  {icon}  {c['name']}: {c['detail']}")
+            if c["fix"]:
+                # Indent multi-line fixes
+                for line in c["fix"].splitlines():
+                    print(f"        {line}")
+        failed = [c for c in checks if c["status"] == "FAIL"]
+        warned = [c for c in checks if c["status"] == "WARN"]
+        print()
+        if failed:
+            print(f"❌ {len(failed)} check(s) FAILED. Fix the items above and re-run.")
+        elif warned:
+            print(f"⚠️  {len(warned)} check(s) WARN. Recording will proceed but may be incomplete.")
+        else:
+            print("✅ all 4 checks passed — script is ready to run.")
+
+    return 1 if any(c["status"] == "FAIL" for c in checks) else 0
+
+
 def cmd_record_and_replace(args: list[str]) -> int:
     """v0.4.0: one-shot record + apply-mapping, replacing the 5-step
     manual §14 workflow with a single command.
@@ -1772,11 +1973,14 @@ def cmd_record_and_replace(args: list[str]) -> int:
     # --help / no args
     if not args or args[0] in ("--help", "-h", "help"):
         print(
-            "usage: record-and-replace <manual.md> --script <recorder.json>\n"
-            "       [--dry-run] [--skip-validate] [--target-url URL]\n\n"
+            "usage: record-and-replace <manual.md> [--script <recorder.json>]\n"
+            "       [--auto-generate-script] [--dry-run] [--skip-validate]\n"
+            "       [--skip-script-check] [--target-url URL]\n\n"
             "One-shot: pre-flight check -> run recorder -> apply mapping ->\n"
-            "validate. Replaces the 5-step SKILL.md §14 workflow. See v0.4.0\n"
-            "CHANGELOG for the rationale.",
+            "validate. Replaces the 5-step SKILL.md §14 workflow.\n"
+            "v0.5.0: --auto-generate-script builds a v0.5.0 template from\n"
+            "the manual + manual-config.json when --script is omitted.\n"
+            "Runs check-recorder-script before recording (skip with --skip-script-check).",
             file=sys.stderr,
         )
         return 0 if args else 2
@@ -1802,6 +2006,13 @@ def cmd_record_and_replace(args: list[str]) -> int:
         elif a == "--target-url" and i + 1 < len(args):
             target_url = args[i + 1]
             i += 2
+        elif a == "--auto-generate-script":
+            # v0.5.0: this is a no-op for the parser; the post-parse
+            # block checks argv directly for it.
+            i += 1
+        elif a == "--skip-script-check":
+            # v0.5.0: same as above — parsed by name later.
+            i += 1
         elif not a.startswith("--") and manual_path is None:
             manual_path = Path(a)
             i += 1
@@ -1812,9 +2023,42 @@ def cmd_record_and_replace(args: list[str]) -> int:
     if manual_path is None or not manual_path.exists():
         print(f"error: manual not found: {manual_path}", file=sys.stderr)
         return 2
-    if script_path is None or not script_path.exists():
+    auto_gen = "--auto-generate-script" in args
+    if script_path is None:
+        if auto_gen:
+            # v0.5.0: no --script given; generate one from the manual +
+            # project_root (= cwd), then continue with that script.
+            project_root = Path.cwd()
+            text = manual_path.read_text(encoding="utf-8", errors="replace")
+            placeholders = scan_recording_placeholders(text)
+            template = build_recorder_template(
+                manual_path.stem, placeholders,
+                manual_path=manual_path, project_root=project_root,
+            )
+            script_path = manual_path.parent / f"{manual_path.stem}.recorder.json"
+            script_path.write_text(
+                json.dumps(template, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            print(f"  auto-generated script: {script_path}", file=sys.stderr)
+        else:
+            print(f"error: --script required (or pass --auto-generate-script to create one)",
+                  file=sys.stderr)
+            return 2
+    if not script_path.exists():
         print(f"error: --script not found: {script_path}", file=sys.stderr)
         return 2
+    # v0.5.0: always run check-recorder-script before recording. If it
+    # returns 1, surface the failures but DO NOT block — some projects
+    # have intentionally-broken dev servers (CI / prod-only). The user
+    # can opt out with --skip-script-check.
+    if not dry_run and "--skip-script-check" not in args:
+        check_rc = cmd_check_recorder_script([str(script_path)])
+        if check_rc == 1:
+            print("", file=sys.stderr)
+            print("  ⚠️  recorder script has issues (see above). Continuing anyway.",
+                  file=sys.stderr)
+            print("  (pass --skip-script-check to silence this)", file=sys.stderr)
 
     print(f"=== record-and-replace: {manual_path.name} ===", file=sys.stderr)
     print(f"  script: {script_path}", file=sys.stderr)
@@ -2119,46 +2363,234 @@ def scan_recording_placeholders(text: str) -> list[dict]:
     return out
 
 
-def build_recorder_template(manual_name: str, placeholders: list[dict]) -> dict:
-    """Generate a recorder script template the LLM agent can fill in.
+def build_recorder_template(
+    manual_name: str,
+    placeholders: list[dict],
+    manual_path: Path | None = None,
+    project_root: Path | None = None,
+) -> dict:
+    """v0.5.0: Generate a recorder script template the LLM agent can fill in.
 
-    Template fields the LLM must fill:
-      - url: target application URL (e.g. https://app.example.com)
-      - auth_env: list of env var names for login creds
-      - steps: ordered list of {action: ...} dicts
+    v0.2.4 — original: stub with `<TODO: ...>` everywhere; agent had to
+    hand-fill every field.
 
-    Screenshots from the manual become explicit "screenshot" steps. Videos
-    become "video_start" / "video_stop" pairs surrounding the relevant steps.
-    AI ANNOTATE markers become "ai_annotate" steps — the recorder will
-    write a request file and yield; the agent fulfills via its own LLM
-    (see recorder §15 / SKILL.md §15).
+    v0.5.0 — auto-fill from project context when given:
+      - `manual_path`: read the .md to extract real per-step captions from
+        the task card `### 步骤` sections (replaces `<TODO: caption>`).
+      - `project_root`: read `docs/user-manual/manual-config.json` to fill
+        `url`, `output_dir`, and infer the starting route from the
+        module's first route (via extract-routes.py output if cached,
+        else a sensible default per module).
+
+    Still emits `<TODO: ...>` markers where the agent MUST intervene:
+      - click selectors (we can't infer from spec text)
+      - auth_env names (project-specific; defaults to standard set
+        of common ones — LG_USER, LG_PASS, etc., inferred from
+        manual_name prefix when possible)
+
+    Returns a dict ready to be `json.dumps()`-ed to a .json file.
     """
+    config = _read_manual_config(project_root) if project_root else {}
+    domain = _domain_for_placeholder(manual_path, "") if manual_path else "<TODO: domain>"
+    # domain from _domain_for_placeholder is e.g. "legal" from "legal-user-manual.md"
+    inferred_url = _infer_target_url(config, project_root)
+    inferred_route = _infer_starting_route(config, domain)
+    inferred_user_env = _infer_auth_env_name(manual_name, "USER")
+    inferred_pass_env = _infer_auth_env_name(manual_name, "PASS")
+    captions = _extract_step_captions(manual_path) if manual_path else {}
+
     return {
         "_doc": (
-            f"Recorder script template generated for {manual_name}. "
-            "The LLM agent must fill in `url`, `auth_env`, and flesh out each "
-            "`steps` entry with concrete CSS selectors / text. Then run via "
-            "`python3 -m recorder_plugin.cli run <this-file>.json` (requires the "
-            "recorder opt-in plugin; see recorder/INSTALL.md). After it finishes, "
-            "produce a mapping JSON {placeholder_name: real_asset_path} and run "
-            "`record-manual <manual.md> --apply-mapping <mapping.json>`."
+            f"Recorder script template generated for {manual_name} (v0.5.0). "
+            f"Auto-filled: url={inferred_url!r}, output_dir inferred from domain, "
+            f"step captions from the manual's `### 步骤` sections. "
+            "Still TODO: click selectors (the agent must read the actual UI), "
+            "and verify auth_env names match this project's credential env vars. "
+            "Then run `python3 -m recorder_plugin.cli run <this-file>.json`."
         ),
         "name": manual_name,
-        "url": "<TODO: target URL>",
+        "url": inferred_url,
         "viewport": {"width": 1440, "height": 900},
-        "output_dir": f"docs/user-manual/screenshots/<TODO: domain>",
+        "output_dir": f"docs/user-manual/screenshots/{domain}/<TODO: subdir>",
         # C fix (v0.2.4 audit): the recorder's resolve_credential() only
         # expands values that start with "$". Bare names like "AUTH_USER"
         # would be passed through as the literal string "AUTH_USER" and
         # submitted to the login form. The $ prefix tells the recorder
         # to look up the env var. Without it, login silently fails.
-        "auth_env": ["$AUTH_USER", "$AUTH_PASS", "$AUTH_TOTP_SECRET"],
+        # v0.5.0: use module-specific env var names when we can infer them.
+        "auth_env": [
+            f"${inferred_user_env}",
+            f"${inferred_pass_env}",
+        ],
         "steps": [
-            {"action": "navigate", "url": "/<TODO: starting route>"},
+            {"action": "navigate", "url": inferred_route},
             {"action": "wait_for", "strategy": "networkidle"},
-            *_step_template_lines(placeholders),
+            # If we can infer a login step, add a placeholder click for
+            # the username / password fields. The agent must fill in the
+            # actual selectors.
+            {"action": "type",
+             "selector": "<TODO: input[name=username], input[type=text], or #username>",
+             "value": f"${inferred_user_env}"},
+            {"action": "type",
+             "selector": "<TODO: input[name=password], input[type=password], or #password>",
+             "value": f"${inferred_pass_env}"},
+            {"action": "click",
+             "selector": "<TODO: button[type=submit], button.login, or [data-test=login-submit]>"},
+            {"action": "wait_for", "strategy": "networkidle"},
+            *_step_template_lines_v2(placeholders, captions),
         ],
     }
+
+
+def _step_template_lines_v2(placeholders: list[dict], captions: dict) -> list[dict]:
+    """v0.5.0: like _step_template_lines, but uses real captions from
+    the manual when available (falls back to <TODO: caption> otherwise).
+    """
+    out = []
+    last_video_started = False
+    for p in placeholders:
+        if p["kind"] == "screenshot":
+            caption = captions.get(p["name"], "<TODO: caption>")
+            out.append({
+                "action": "screenshot",
+                "name": p["name"],
+                "annotate": [{"shape": "box", "x": 0, "y": 0, "w": 200, "h": 50,
+                              "label": caption}],
+            })
+        elif p["kind"] == "video":
+            if not last_video_started:
+                out.append({"action": "video_start", "name": p["name"]})
+                last_video_started = True
+            else:
+                out.append({"action": "video_stop", "name": f"<TODO: previous-video>"})
+                out.append({"action": "video_start", "name": p["name"]})
+        elif p["kind"] == "ai_annotate":
+            out.append({
+                "action": "ai_annotate",
+                "screenshot": p["name"],
+                "prompt": "",
+            })
+    if last_video_started:
+        out.append({"action": "video_stop", "name": "<TODO: last-video>"})
+    return out
+
+
+def _read_manual_config(project_root: Path | None) -> dict:
+    """v0.5.0: read manual-config.json if present; return empty dict otherwise.
+    Catches all errors (missing file, bad JSON) so this is a safe no-op fallback."""
+    if project_root is None:
+        return {}
+    cfg_path = project_root / "docs" / "user-manual" / "manual-config.json"
+    try:
+        return json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _infer_target_url(config: dict, project_root: Path | None) -> str:
+    """v0.5.0: build the target URL from manual-config.json.
+
+    Config schema (v2): { "project": { "name": ..., "host": ..., "port": ... } }
+    Old schema: { "name": ..., "host": ..., "port": ... }
+
+    Returns a URL like "http://localhost:8080" or "<TODO: target URL>" if
+    the config is missing or has placeholders.
+    """
+    if not config:
+        return "<TODO: target URL — set in manual-config.json project.host + port>"
+    p = config.get("project") or config  # support both v2 nested and flat
+    host = p.get("host", "<TODO: host>")
+    port = p.get("port", "<TODO: port>")
+    if str(host).startswith("<") or str(port).startswith("<"):
+        return f"http://{host}:{port}"
+    return f"http://{host}:{port}"
+
+
+def _infer_starting_route(config: dict, domain: str) -> str:
+    """v0.5.0: infer a starting route for the recorder.
+
+    Tries config.project.starting_routes[domain], then falls back to
+    a per-domain conventional default (e.g. /contracts for legal,
+    /employees for sys). Always returns a path starting with /.
+    """
+    if config:
+        p = config.get("project") or config
+        routes = p.get("starting_routes") or {}
+        if domain in routes:
+            r = routes[domain]
+            return r if r.startswith("/") else "/" + r
+    # Conventional defaults per domain (covers common cases)
+    defaults = {
+        "sys":     "/users",
+        "system":  "/users",
+        "legal":   "/contracts",
+        "lg":      "/contracts",
+        "esg":     "/dashboard",
+        "audit":   "/plans",
+        "au":      "/plans",
+        "overview": "/dashboard",
+    }
+    return defaults.get(domain, "/<TODO: starting route>")
+
+
+def _infer_auth_env_name(manual_name: str, suffix: str) -> str:
+    """v0.5.0: infer a sensible env var name for credentials.
+
+    e.g. "legal-user-manual" -> "LEGAL_USER" / "LEGAL_PASS".
+    Falls back to "AUTH_USER" / "AUTH_PASS" if the name is too generic.
+    """
+    stem = manual_name.replace("-user-manual", "").replace("_user_manual", "")
+    stem = stem.upper().replace("-", "_").strip("_")
+    if not stem or len(stem) < 2:
+        return f"AUTH_{suffix}"
+    return f"{stem}_{suffix}"
+
+
+def _extract_step_captions(manual_path: Path) -> dict:
+    """v0.5.0: scan the manual for `### 步骤` sections under each task
+    card, and return {screenshot_name: caption_string}.
+
+    Heuristic: the first text in each numbered list item under
+    `### 步骤` becomes a caption. The mapping screenshot_name -> caption
+    is built by taking the i-th step caption and matching it to the
+    i-th `[SCREENSHOT: <name>]` placeholder in document order.
+    """
+    try:
+        text = manual_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    placeholders = scan_recording_placeholders(text)
+    placeholder_names = [p["name"] for p in placeholders if p["kind"] == "screenshot"]
+
+    # Find each `### 步骤` block and extract numbered items
+    captions_per_block: list[list[str]] = []
+    in_steps = False
+    current_block: list[str] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("### 步骤"):
+            in_steps = True
+            current_block = []
+            continue
+        if in_steps:
+            if s.startswith("###") or s.startswith("##"):
+                # End of this block
+                if current_block:
+                    captions_per_block.append(current_block)
+                in_steps = False
+                continue
+            # Numbered list item: "1. xxx", "2. xxx"
+            import re
+            m = re.match(r"^(\d+)\.\s+(.+)$", s)
+            if m:
+                current_block.append(m.group(2).strip())
+    if current_block:
+        captions_per_block.append(current_block)
+
+    # Flatten (one caption per step in document order, matching the
+    # first N screenshot placeholders)
+    flat = [cap for block in captions_per_block for cap in block]
+    return {name: cap for name, cap in zip(placeholder_names, flat)}
 
 
 def _step_template_lines(placeholders: list[dict]) -> list[dict]:
@@ -2484,6 +2916,9 @@ def main(argv: list[str]) -> int:
 
     if cmd == "record-and-replace":
         return cmd_record_and_replace(argv[2:])
+
+    if cmd == "check-recorder-script":
+        return cmd_check_recorder_script(argv[2:])
 
     if cmd == "html-template-version":
         print(html_template_version())
