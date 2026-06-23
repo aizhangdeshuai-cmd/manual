@@ -305,7 +305,7 @@ A: 说明这个业务类型还没配置审批流。找系统管理员在「审�
 
 ### 数据类
 **Q: 列表加载不出来,一直转圈?**
-A: 看浏览器右上角网络图标 — 红色断线 = 网络问题,黄色 = 慢。再看后端日志:tail -f /var/log/grc/app.log | grep ERROR。
+A: 看浏览器右上角网络图标 — 红色断线 = 网络问题,黄色 = 慢。再看后端日志:tail -f /var/log/<your-project>/app.log | grep ERROR。
 
 **Q: 搜索"张三"搜不到?**
 A: 检查是否包含特殊字符,试试只搜姓"张";确认张三已激活(不是停用状态)。
@@ -470,7 +470,7 @@ bash §5.4 里的 bash 脚本 docs/user-manual/manual/<name>.md
 python3 scripts/validate-output.py docs/user-manual/manual/<name>.md --strict
 ```
 
-**v0.5.4 硬门**: 任一个 FAIL 都不能宣布手册完成。LLM 代理人在 commit 前 **必须**把两个检查的输出(含 `hits=N/threshold=M` 数字)贴到 commit message 或 输出里。`validate-output.py --strict` 走 `placeholder_alt` 会报 grc 项目那 98 个 `占位:` alt(§2.2 禁止模式) — 这些是 LLM 代理人 “草稿当成品” 的典型忠冲。
+**v0.5.4 硬门**: 任一个 FAIL 都不能宣布手册完成。LLM 代理人在 commit 前 **必须**把两个检查的输出(含 `hits=N/threshold=M` 数字)贴到 commit message 或 输出里。`validate-output.py --strict` 走 `placeholder_alt` 会报任何项目里的 `占位:` alt (grc 项目审计时是 98 个)(§2.2 禁止模式) — 这些是 LLM 代理人 “草稿当成品” 的典型忠冲。
 
 ```markdown
 ### 任务卡 1: <动词开头任务名,如"创建新员工账号">
