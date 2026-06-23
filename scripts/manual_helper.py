@@ -1975,12 +1975,15 @@ def cmd_record_and_replace(args: list[str]) -> int:
         print(
             "usage: record-and-replace <manual.md> [--script <recorder.json>]\n"
             "       [--auto-generate-script] [--dry-run] [--skip-validate]\n"
+            "       [--skip-viewer-regen]\n"
             "       [--skip-script-check] [--target-url URL]\n\n"
             "One-shot: pre-flight check -> run recorder -> apply mapping ->\n"
             "validate. Replaces the 5-step SKILL.md §14 workflow.\n"
             "v0.5.0: --auto-generate-script builds a v0.5.0 template from\n"
             "the manual + manual-config.json when --script is omitted.\n"
-            "Runs check-recorder-script before recording (skip with --skip-script-check).",
+            "Runs check-recorder-script before recording (skip with --skip-script-check).\n"
+            "Auto-regenerates the viewer (user-manual.html) at the end if the\n"
+            "shipped template is newer (skip with --skip-viewer-regen).",
             file=sys.stderr,
         )
         return 0 if args else 2
@@ -1990,6 +1993,7 @@ def cmd_record_and_replace(args: list[str]) -> int:
     script_path = None
     dry_run = False
     skip_validate = False
+    skip_viewer_regen = False
     target_url = None
     i = 0
     while i < len(args):
@@ -2012,6 +2016,11 @@ def cmd_record_and_replace(args: list[str]) -> int:
             i += 1
         elif a == "--skip-script-check":
             # v0.5.0: same as above — parsed by name later.
+            i += 1
+        elif a == "--skip-viewer-regen":
+            # v0.5.0: opt out of auto-regenerating user-manual.html
+            # after record-and-replace. For CI / pinned-viewer envs.
+            skip_viewer_regen = True
             i += 1
         elif not a.startswith("--") and manual_path is None:
             manual_path = Path(a)
@@ -2064,6 +2073,33 @@ def cmd_record_and_replace(args: list[str]) -> int:
     print(f"  script: {script_path}", file=sys.stderr)
     if dry_run:
         print("  mode: DRY-RUN (no recording, no writes)", file=sys.stderr)
+
+    # v0.5.0: auto-regenerate <proj>/docs/user-manual/user-manual.html
+    # BEFORE pre-flight, so the upgrade happens even if the recorder deps
+    # are missing (the LLM agent is running on a fresh container). The
+    # user gets the latest viewer no matter what the recorder does.
+    if skip_viewer_regen:
+        print("  viewer: auto-regen skipped (--skip-viewer-regen)", file=sys.stderr)
+    else:
+        try:
+            html_root = None
+            for parent in manual_path.parents:
+                if parent.name == "user-manual" and (parent / "manual").is_dir():
+                    html_root = parent
+                    break
+                if parent.name == "docs" and (parent / "user-manual").is_dir():
+                    html_root = parent / "user-manual"
+                    break
+            if html_root is None:
+                html_root = manual_path.parent
+            html_target = html_root / "user-manual.html"
+            regen_status = regenerate_html_if_stale(html_target)
+            if regen_status == "regenerated":
+                print(f"  viewer: regenerated {html_target} (template v{html_template_version()})", file=sys.stderr)
+            elif regen_status == "created":
+                print(f"  viewer: created {html_target} (template v{html_template_version()})", file=sys.stderr)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            print(f"  viewer: auto-regen skipped ({type(e).__name__}: {e})", file=sys.stderr)
 
     # Step 1: pre-flight
     preflight_ok, preflight_msgs = _preflight_recorder(
@@ -2786,10 +2822,13 @@ def main(argv: list[str]) -> int:
         return 0
 
     if cmd == "init-skill":
-        proj_root = Path(argv[2]) if len(argv) == 3 else Path.cwd()
-        # v0.4.0: parse --no-install / --allow-blocked flags
+        # v0.4.0: parse --no-install / --allow-blocked flags first so the
+        # positional <proj_root> is whatever non-flag arg remains. Tests
+        # invoke this as `init-skill --allow-blocked <d>` (4 argv slots).
         auto_install = "--no-install" not in argv
         allow_blocked = "--allow-blocked" in argv
+        positionals = [a for a in argv[2:] if not a.startswith("--")]
+        proj_root = Path(positionals[0]) if positionals else Path.cwd()
         try:
             result = init_skill(
                 proj_root,
@@ -2830,6 +2869,21 @@ def main(argv: list[str]) -> int:
             else:
                 print("", file=sys.stderr)
                 print("⚠️  auto-install could not complete; see messages above.", file=sys.stderr)
+        # v0.5.0: auto-regenerate <proj>/docs/user-manual/user-manual.html
+        # if the shipped template is newer than what is on disk. Keeps
+        # the viewer (TOC fix, etc.) in sync without forcing the user
+        # to remember to re-build after a skill upgrade. Failures here
+        # are non-fatal: the LLM may be running on a read-only project
+        # root, or the project may not have a user-manual.html yet.
+        try:
+            html_target = proj_root / "docs" / "user-manual" / "user-manual.html"
+            regen_status = regenerate_html_if_stale(html_target)
+            if regen_status == "regenerated":
+                print(f"  viewer: regenerated {html_target} (template v{html_template_version()})", file=sys.stderr)
+            elif regen_status == "created":
+                print(f"  viewer: created {html_target} (template v{html_template_version()})", file=sys.stderr)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            print(f"  viewer: auto-regen skipped ({type(e).__name__}: {e})", file=sys.stderr)
         return 0
 
     if cmd == "check-recording-readiness":

@@ -82,9 +82,10 @@ h2 is targeted after `placeholder.replaceWith(wrap)` settles.
 
 ### Tests
 
-`scripts/tests/test_manual_helper.py`: 110 → 123 tests
-(+13 new for CheckRecorderScriptTests / BuildRecorderTemplateV2Tests
-/ RecordAndReplaceAutoGenTests). All pass.
+`scripts/tests/test_manual_helper.py`: 110 → 128 tests
+(+18 new for CheckRecorderScriptTests / BuildRecorderTemplateV2Tests
+/ RecordAndReplaceAutoGenTests / InitSkillAutoRegenTests
+/ RecordAndReplaceAutoRegenTests). All pass.
 
 ### Migration
 
@@ -93,8 +94,36 @@ h2 is targeted after `placeholder.replaceWith(wrap)` settles.
 - New runs: pass `--auto-generate-script` to
   `record-and-replace` and skip the hand-template step
   entirely.
-- Re-build standalone.html after this update — the viewer
-  template changed (TOC fix).
+- The viewer template changed (TOC fix) — but you do NOT
+  need to manually re-build standalone.html after upgrading.
+  Both `init-skill` and `record-and-replace` now auto-regenerate
+  `<proj>/docs/user-manual/user-manual.html` if the shipped
+  template is newer than what's on disk. Opt out with
+  `--skip-viewer-regen` on `record-and-replace` (e.g. CI
+  environments that ship a pinned viewer).
+
+### Added — auto-regenerate viewer on `init-skill` and `record-and-replace`
+
+`init-skill` and `record-and-replace` both call
+`regenerate_html_if_stale(<proj>/docs/user-manual/user-manual.html)`
+after their main work. Behavior:
+
+- **template version newer than on-disk** → copy template over,
+  log `viewer: regenerated <path> (template v<N>)` to stderr
+- **on-disk missing** → create from template, log
+  `viewer: created <path> (template v<N>)` to stderr
+- **on-disk up-to-date** → no-op, no log line
+- **failure** (read-only project root, malformed version
+  marker) → log `viewer: auto-regen skipped (<ErrorType>: <msg>)`,
+  continue without aborting the command
+
+This is the fix for the previous session's "1-entry sidebar TOC"
+regression: the user no longer has to remember to re-build the
+viewer after a skill upgrade that includes template fixes. The
+new buildToc() + auto-regen pair means upgrades Just Work.
+
+`record-and-replace` also accepts `--skip-viewer-regen` for
+CI environments that ship a pinned viewer.
 
 
 

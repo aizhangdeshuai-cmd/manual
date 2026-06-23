@@ -430,3 +430,156 @@ class RecordAndReplaceAutoGenTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InitSkillAutoRegenTests(unittest.TestCase):
+    """v0.5.0: init-skill auto-regenerates the viewer when the shipped
+    template is newer than what is on disk. The user no longer has to
+    remember to re-run a build step after a skill upgrade."""
+
+    def test_init_skill_regenerates_stale_user_manual_html(self):
+        """A project with a stale user-manual.html gets the current
+        template version after init-skill, and stderr reports the
+        regeneration. The fix for the prior session's "1-entry TOC"
+        regression ships automatically."""
+        with tempfile.TemporaryDirectory() as d:
+            proj = Path(d)
+            um = proj / "docs" / "user-manual"
+            um.mkdir(parents=True)
+            # personas.json is required by init-skill
+            (um / "personas.json").write_text('{"personas": [{"id": "x", "name": "X"}]}')
+            # Stale viewer (version 1)
+            stale = um / "user-manual.html"
+            stale.write_text("<!-- user-manual-dashboard-version: 1 -->\n<html></html>")
+            r = run_module("init-skill", "--allow-blocked", d)
+            self.assertEqual(r.returncode, 0, msg=f"init-skill crashed: {r.stderr[:500]}")
+            new_text = stale.read_text()
+            # The file should now match the current template version
+            import re
+            m = re.search(r"user-manual-dashboard-version:\s*(\d+)", new_text)
+            self.assertIsNotNone(m, f"no version marker after init-skill: {new_text[:200]}")
+            new_version = int(m.group(1))
+            self.assertGreaterEqual(new_version, 25,
+                msg=f"expected version >= 25 (current template), got {new_version}")
+            # Stderr should mention regeneration
+            self.assertIn("viewer: regenerated", r.stderr,
+                          msg=f"missing 'viewer: regenerated' in stderr: {r.stderr[:400]}")
+
+    def test_init_skill_creates_user_manual_html_when_missing(self):
+        """First-time init: no user-manual.html exists yet, init-skill
+        should create it with the current template version."""
+        with tempfile.TemporaryDirectory() as d:
+            proj = Path(d)
+            um = proj / "docs" / "user-manual"
+            um.mkdir(parents=True)
+            (um / "personas.json").write_text('{"personas": [{"id": "x", "name": "X"}]}')
+            target = um / "user-manual.html"
+            self.assertFalse(target.exists(), "precondition: file must not exist yet")
+            r = run_module("init-skill", "--allow-blocked", d)
+            self.assertEqual(r.returncode, 0, msg=f"init-skill crashed: {r.stderr[:500]}")
+            self.assertTrue(target.exists(),
+                            msg=f"user-manual.html not created: stderr={r.stderr[:400]}")
+            self.assertIn("viewer: created", r.stderr,
+                          msg=f"missing 'viewer: created' in stderr: {r.stderr[:400]}")
+
+    def test_init_skill_does_not_overwrite_up_to_date_viewer(self):
+        """If the on-disk user-manual.html is already at the current
+        version, init-skill should NOT touch it (no spurious writes,
+        and stderr should be silent on the viewer line)."""
+        with tempfile.TemporaryDirectory() as d:
+            proj = Path(d)
+            um = proj / "docs" / "user-manual"
+            um.mkdir(parents=True)
+            (um / "personas.json").write_text('{"personas": [{"id": "x", "name": "X"}]}')
+            target = um / "user-manual.html"
+            # Copy the actual template to get the current version
+            import shutil
+            tmpl = SCRIPT_DIR.parent / "templates" / "user-manual.html"
+            shutil.copyfile(tmpl, target)
+            original_bytes = target.read_bytes()
+            r = run_module("init-skill", "--allow-blocked", d)
+            self.assertEqual(r.returncode, 0, msg=r.stderr)
+            # File is byte-identical (no spurious write)
+            self.assertEqual(target.read_bytes(), original_bytes,
+                             "init-skill re-wrote an up-to-date viewer")
+            # No "regenerated" / "created" line in stderr
+            self.assertNotIn("viewer: regenerated", r.stderr)
+            self.assertNotIn("viewer: created", r.stderr)
+
+
+class RecordAndReplaceAutoRegenTests(unittest.TestCase):
+    """v0.5.0: record-and-replace auto-regenerates the viewer at the end
+    of a (real or dry-run) recording. Opt out with --skip-viewer-regen."""
+
+    def test_record_and_replace_dry_run_regenerates_viewer(self):
+        """A --dry-run --auto-generate-script call (no actual recording)
+        should still auto-regen the viewer so the build is consistent.
+        The script-generation path doesn't actually run the recorder, so
+        this is the cheapest end-to-end test."""
+        with tempfile.TemporaryDirectory() as d:
+            proj = Path(d)
+            um = proj / "docs" / "user-manual"
+            um.mkdir(parents=True)
+            (um / "manual-config.json").write_text(
+                json.dumps({"project": {"host": "localhost", "port": 8080}})
+            )
+            manual_dir = um / "manual"
+            manual_dir.mkdir(parents=True, exist_ok=True)
+            manual = manual_dir / "lg-user-manual.md"
+            manual.write_text("# Manual\n[SCREENSHOT: shot1.png]\n")
+            # Stale viewer on disk
+            stale = um / "user-manual.html"
+            stale.write_text("<!-- user-manual-dashboard-version: 1 -->\n<html></html>")
+            # Run record-and-replace from project root (cwd matters for Path.cwd())
+            r = subprocess.run(
+                [PYTHON, "-m", "manual_helper", "record-and-replace",
+                 str(manual), "--auto-generate-script", "--dry-run"],
+                capture_output=True, text=True, check=False,
+                cwd=str(proj),
+                env={**os.environ, "PYTHONPATH": str(SCRIPT.parent)},
+            )
+            # Pre-flight may fail (deps missing on a fresh host) but the
+            # auto-regen block runs BEFORE the recorder, so the viewer
+            # should be upgraded regardless of the recorder rc.
+            # We assert on the file, not the rc.
+            import re
+            self.assertTrue(stale.exists(),
+                            msg=f"viewer file disappeared: stderr={r.stderr[:400]}")
+            new_text = stale.read_text()
+            m = re.search(r"user-manual-dashboard-version:\s*(\d+)", new_text)
+            self.assertIsNotNone(m, f"no version marker: {new_text[:200]}")
+            new_version = int(m.group(1))
+            self.assertGreaterEqual(new_version, 25,
+                msg=f"expected viewer version >= 25, got {new_version}")
+            # Stderr should report the regeneration
+            self.assertIn("viewer: regenerated", r.stderr,
+                          msg=f"missing 'viewer: regenerated' in stderr: {r.stderr[:400]}")
+
+    def test_record_and_replace_skip_viewer_regen_does_not_touch_viewer(self):
+        """--skip-viewer-regen must leave a stale viewer untouched
+        (for CI environments that ship a pinned viewer)."""
+        with tempfile.TemporaryDirectory() as d:
+            proj = Path(d)
+            um = proj / "docs" / "user-manual"
+            um.mkdir(parents=True)
+            (um / "manual-config.json").write_text(
+                json.dumps({"project": {"host": "localhost", "port": 8080}})
+            )
+            manual_dir = um / "manual"
+            manual_dir.mkdir(parents=True, exist_ok=True)
+            manual = manual_dir / "lg-user-manual.md"
+            manual.write_text("# Manual\n")
+            stale = um / "user-manual.html"
+            stale.write_text("<!-- user-manual-dashboard-version: 1 -->\n<html>STALE</html>")
+            r = subprocess.run(
+                [PYTHON, "-m", "manual_helper", "record-and-replace",
+                 str(manual), "--auto-generate-script", "--dry-run",
+                 "--skip-viewer-regen"],
+                capture_output=True, text=True, check=False,
+                cwd=str(proj),
+                env={**os.environ, "PYTHONPATH": str(SCRIPT.parent)},
+            )
+            # Viewer should be UNCHANGED
+            self.assertEqual(stale.read_text(), "<!-- user-manual-dashboard-version: 1 -->\n<html>STALE</html>",
+                             msg=f"--skip-viewer-regen did not skip: stderr={r.stderr[:400]}")
+            self.assertIn("viewer: auto-regen skipped (--skip-viewer-regen)", r.stderr)
