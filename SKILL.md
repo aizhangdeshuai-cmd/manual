@@ -420,6 +420,7 @@ narration_rate: "+0%"  # 可选,语速调节
 | 9 | **任务卡** | 按 personas 派生,**每张卡 7 字段硬模板 + "操作前必看"块** | LLM |
 | 10 | 字段参考 | 用 `extract-fields.py` 聚合,按模块分组 | 自动 |
 | 11 | 配置参考 + 故障速查(场景化) + 联系支持 | 配置项;故障速查按 4 类(权限/网络/数据/操作);联系支持 | LLM |
+| 12 | **Citations**(v0.5.2 opt-in) | **默认不写**。仅当 `manual-config.json: include_citations: true` 才生成,内部两张子表(Project artifacts / External references)用于代码审查的 SHA 跟踪。**不要**给最终用户看,他们是 noise | LLM(条件) |
 | 附录 A | 错误码速查(6 列硬结构) | HTTP 状态 / 业务错误码 / 症状 / 原因 / 解法 / 找谁 | LLM |
 | 附录 B | 联系方式 / 技术支持 | 团队 / 邮箱 / 工单系统 | LLM |
 
@@ -633,7 +634,7 @@ python3 -m manual_helper fill-citation-shas docs/user-manual/manual/<name>.md
 
 **v0.5.2: Citations 段默认关闭,opt-in。** 它是给代码审查 / SHA 跟踪用的,不是给最终用户看的。
 
-- **默认行为**(`manual-config.json` 不写 `include_citations`):LLM **不**在分册末尾生成 `## Citations` 段。skill 端 helper 仍然扫描制品并算 SHA(在 `_internal/citations.json` 里),但 markdown 不渲染。
+- **默认行为**(`manual-config.json` 不写 `include_citations`):LLM **不**在分册末尾生成 `## Citations` 段。skill 端 helper(`fill-citation-shas`)仍然能算 SHA(传入 `<md-path>` 即返回 markdown_table),但 markdown 不渲染。
 - **打开方式**:`manual-config.json` 顶层加 `"include_citations": true`(适用做合规审计的项目,需要可追溯到具体 spec SHA)。
 - **强制必含**:如果开了,LLM 写完**必须**跑 `python3 -m manual_helper fill-citation-shas <this.md>` 把 `(auto)` 占位替换成真 SHA,否则 validate FAIL。
 
@@ -721,14 +722,14 @@ db 模式额外:
 4. **Web 搜索补强**:仅用于(1)术语 / 缩写展开、(2)项目外部标准。**不**用于项目内部事实。
 5. **跑 helpers 抽数据**:4 个 extract helper 输出 JSON 数组
 6. **写手册**:按第 5 节流程合成
-7. **更新 Citations**:new / changed / missing 分类处理
+7. **更新 Citations**(`v0.5.2:` **仅当** `manual-config.json: include_citations: true` 才执行):new / changed / missing 分类处理。否则跳过,markdown 不写 `## Citations` 段
 8. **Regen HTML**:`regenerate-html-if-stale` 触发条件是模板版本号变化
 9. **报告**:一行一桶(Manual updated / HTML viewer / Missing artifacts)
 10. **问 commit & push**:默认不 commit,等用户确认
 
 ## 11. 反模式(避免)
 
-- ❌ 整篇覆盖写:每跑都重写整本,丢用户编辑。**用 Citations 账本做幂等**。
+- ❌ 整篇覆盖写:每跑都重写整本,丢用户编辑。**`include_citations: true` 时**用 Citations 账本做幂等;默认关,直接覆盖整本没问题。
 - ❌ 把制品原文塞进手册:手册是给用户的,不是给开发者的。**综合,不抄**。
 - ❌ 链接到 spec 当解释:用户点过去看 600 行 spec = 失败模式。**写解释,然后引用**。
 - ❌ 折叠 WIP / cancelled 制品:手册描述当前已交付能力。

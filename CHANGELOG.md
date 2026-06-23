@@ -4,6 +4,77 @@ Top-level changelog for the user-manual skill. The recorder opt-in
 plugin (`recorder/`) has its own changelog at `recorder/CHANGELOG.md` —
 versioned in lockstep with the main skill.
 
+## 0.5.3 (2026-06-23) — audit fix pass: regex + null host + narration type
+
+Three P1 bugs surfaced by independent skill review on 2026-06-23:
+
+- `scripts/validate-output.py`: `7-field hits` regex now matches BOTH
+  `### 步骤` (legacy) and `#### 步骤` (current SKILL.md §4 template).
+  Before, manuals strictly following v0.5.2 §4 only got 4 hits instead
+  of the required ≥ 6, and only passed because the OTHER 5 keywords
+  happened to be over-represented.
+- `scripts/manual_helper.py:_infer_target_url`: handles `host: null` /
+  empty / 0 by falling back to `<TODO: host>`. Before, it produced
+  `http://None:8080` and the recorder would try to connect to a
+  non-resolvable hostname.
+- `recorder/recorder_plugin/script.py:_preflight_narration_coverage`:
+  now rejects `narration: "string"` (a non-list truthy value) as
+  missing. Before, the preflight was OK but `_apply_narration` silently
+  skipped via `isinstance(narration_segs, list)`, producing silent
+  video — exactly the failure mode v0.5.1 was supposed to fix.
+
+Also:
+- §5/§10/§11 of SKILL.md updated to clarify Citations is opt-in
+  (v0.5.2 was documented but the prompt flow still said "always
+  update Citations"). §3 chapter table now lists Citations as row 12
+  (opt-in).
+- example/dryrun-sys-user-manual.md `## 目录` filled with 13 anchor
+  links (was: empty + comment).
+
+## 0.5.2 (2026-06-23) — strict task-card format, opt-in Citations, filled 目录
+
+Audit 2026-06-23 of grc project's regenerated manuals found 4
+recurring quality issues that the LLM kept reintroducing. All
+four are 'format' issues, not content — fix them in the skill's
+markdown templates so the next LLM run gets them right.
+
+1. **Task card heading format (P1#2)**: LLMs were emitting
+   `### 创建合同` instead of `### 任务卡 1: 创建合同`. The
+   section §4 template used `### <动词开头任务名, 如"...">`
+   which left room for the LLM to drop the '任务卡 N:' prefix.
+   Fixed: §4 template now uses `### 任务卡 1: <title>` as the
+   literal template, plus a new 'v0.5.2: 任务卡 heading 严格格式'
+   block listing 3 failure anti-patterns.
+2. **Opt-in Citations**: User reported on 2026-06-23 that
+   the '## Citations' section was noise at the bottom of every
+   page (it tracks artifact SHAs for code review, not end-user
+   reference). Fixed: §6 now says Citations is OFF by default,
+   turned on by setting `include_citations: true` in
+   `manual-config.json`.
+3. **目录 must be filled**: §3 chapter table said
+   'viewer 自动生成, 文档内标注即可' which let the LLM emit
+   an empty `## 目录` heading. Fixed: §3 row now says LLM must
+   fill 5-10 anchor links.
+4. **#### 步骤 wrapper**: Some LLM runs dropped the
+   `#### 步骤` heading and just used bare `1. 2. 3.' lists.
+   Fixed: §4 adds a 'v0.5.2: 步骤块必须用 #### 步骤 包裹'
+   block with success/failure examples.
+
+Test: 271/271 (132 scripts + 139 recorder). All pass.
+
+## 0.5.1 (2026-06-23) — surface missing narration field (no more silent videos)
+
+Audit 2026-06-23 found that recorder script's 'narration' field is
+opt-in, and the 'opt-in' framing was indistinguishable from 'silent
+failure' in practice. When an LLM agent forgot the field, the
+recorder silently produced a silent mp4 with no warning, no exit
+code change, and no signal of why.
+
+This change makes the silent-failure case loud at three layers:
+1. Runtime preflight in `run_script()` (`recorder/script.py:417`).
+2. Skill-side check in `cmd_check_recorder_script` (new check #5 NARRATION COVERAGE).
+3. `_apply_narration` end-to-end test coverage (4 new tests).
+
 ## 0.5.0 (2026-06-23) — auto-generate recorder scripts + TOC for lazy chunks
 
 ### Headline: close the "recorder script is broken" loop

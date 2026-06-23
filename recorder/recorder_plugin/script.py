@@ -304,8 +304,13 @@ def _preflight_narration_coverage(steps: list, *, force: bool = False) -> None:
     video_stops = [s for s in steps if s.get("action") == "video_stop"]
     if not video_stops:
         return  # No video sessions, nothing to check.
-    have_narration = [s for s in video_stops if s.get("narration")]
-    missing = [s for s in video_stops if not s.get("narration")]
+    # v0.5.3: also reject `narration: <not a list>`. A string like
+    # "step 1, step 2" is truthy but _apply_narration (line 552) skips it
+    # via isinstance(narration_segs, list) check, producing silent video.
+    have_narration = [s for s in video_stops
+                      if s.get("narration") and isinstance(s.get("narration"), list)]
+    missing = [s for s in video_stops
+               if not s.get("narration") or not isinstance(s.get("narration"), list)]
     if not missing:
         return  # All video_stops have narration — good.
     missing_names = [s.get("name", f"<step-{i}>") for i, s in enumerate(missing)]

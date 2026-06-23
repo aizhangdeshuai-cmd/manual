@@ -2584,8 +2584,11 @@ def _infer_target_url(config: dict, project_root: Path | None) -> str:
     if not config:
         return "<TODO: target URL — set in manual-config.json project.host + port>"
     p = config.get("project") or config  # support both v2 nested and flat
-    host = p.get("host", "<TODO: host>")
-    port = p.get("port", "<TODO: port>")
+    # v0.5.3: use `or` so None / "" / 0 all fall back to the TODO marker.
+    # Without this, `host: null` produced `http://None:8080` and the
+    # recorder would try to connect to a non-resolvable hostname.
+    host = p.get("host") or "<TODO: host>"
+    port = p.get("port") or "<TODO: port>"
     if str(host).startswith("<") or str(port).startswith("<"):
         return f"http://{host}:{port}"
     return f"http://{host}:{port}"
