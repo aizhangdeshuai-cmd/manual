@@ -1,6 +1,6 @@
 ---
 name: user-manual
-description: Generate and incrementally maintain a per-project user manual at `<project>/docs/user-manual/manual/*.md` plus a self-contained HTML viewer, by analyzing the project's superpowers artifacts (`docs/superpowers/{specs,plans,findings,reviews}/`) and fortifying with web search. Trigger on `/user-manual`, "generate user manual", "create user manual", "update the user manual", "refresh the manual", "build a manual from the specs and plans", or any phrase asking for end-user / operator documentation drawn from project specs and plans. Idempotent across runs via a Citations section that records the SHA256 of every cited artifact — only new or changed artifacts are folded in on subsequent runs. Targets business users as the primary audience (operations / specialist / manager / approver / external collaborators), and writes in the **Feishu / DingTalk-style** user-guide tradition: granular task cards (one task card = one specific operation, not a user journey), screenshot-driven with colloquial captions, "操作前必看" preamble per task card, ultra-short imperative sentences, embedded Q&A section, video support alongside screenshots. Frontmatter reserves `audience / task / prerequisites / related` fields for future Q&A AI integration. Project-agnostic core + project-layer config — same skill works on any project that fills in `manual-config.json` + `personas.json`. When the optional `recorder/` opt-in plugin is installed, screenshots and videos are produced automatically by the recorder's LLM agent invoking Playwright; the plugin's design lives in `recorder/SKILL.md` and install steps in `recorder/INSTALL.md`. Do not invoke for purely internal / developer-facing READMEs that aren't drawn from superpowers artifacts.
+description: Generate and incrementally maintain a per-project user manual at `<project>/docs/user-manual/manual/*.md` plus a self-contained HTML viewer, by analyzing the project's superpowers artifacts (`docs/superpowers/{specs,plans,findings,reviews}/`) and fortifying with web search. Trigger on `/user-manual`, "generate user manual", "create user manual", "update the user manual", "refresh the manual", "build a manual from the specs and plans", or any phrase asking for end-user / operator documentation drawn from project specs and plans. Idempotent across runs (the optional `## Citations` section, off by default, records the SHA256 of every cited artifact when `manual-config.json` sets `include_citations: true`; only new or changed artifacts are folded in on subsequent runs). Targets business users as the primary audience (operations / specialist / manager / approver / external collaborators), and writes in the **Feishu / DingTalk-style** user-guide tradition: granular task cards (one task card = one specific operation, not a user journey), screenshot-driven with colloquial captions, "操作前必看" preamble per task card, ultra-short imperative sentences, embedded Q&A section, video support alongside screenshots. Frontmatter reserves `audience / task / prerequisites / related` fields for future Q&A AI integration. Project-agnostic core + project-layer config — same skill works on any project that fills in `manual-config.json` + `personas.json`. When the optional `recorder/` opt-in plugin is installed, screenshots and videos are produced automatically by the recorder's LLM agent invoking Playwright; the plugin's design lives in `recorder/SKILL.md` and install steps in `recorder/INSTALL.md`. Do not invoke for purely internal / developer-facing READMEs that aren't drawn from superpowers artifacts.
 ---
 
 # User Manual
@@ -412,7 +412,7 @@ narration_rate: "+0%"  # 可选,语速调节
 | 1 | 封面信息(frontmatter) | title / module / module_code / version / version_date / audience / task / prerequisites / related | LLM |
 | 2 | 文档说明 | 本分册面向谁、范围、不包含什么、与其他分册的关系 | LLM |
 | 3 | **读法指南** | 本分册怎么读、各章节定位、视觉锚点说明、Q&A 怎么用 | LLM |
-| 4 | 目录 | viewer 自动生成,文档内标注即可 | 自动 |
+| 4 | 目录 | **v0.5.2:** LLM 必须填链接,不能留空。Markdown 文档的 `## 目录` 段必须含 5-10 行 `[<任务卡标题>](#<anchor>)` 形式,viewer 不替生成(避免双重 TOC 视觉割裂)。例:<br>`## 目录`<br>`- [文档说明](#文档说明)`<br>`- [读法指南](#读法指南)`<br>`- [任务卡 1:登录](#任务卡-1登录)`<br>`- [任务卡 2:切换分册](#任务卡-2切换分册)`<br>`- [常见问题](#常见问题)` | LLM |
 | 5 | 修订历史 | 独立小节,frontmatter `revision_history` 字段同步 | LLM |
 | 6 | 术语表 | 项目专属术语 + 业务领域缩写,首次出现展开 | LLM |
 | 7 | 系统概述 | 运行环境、浏览器、登录入口、关键模块地图 | LLM |
@@ -454,7 +454,7 @@ narration_rate: "+0%"  # 可选,语速调节
 > 跑完：`python3 scripts/validate-output.py docs/user-manual/manual/<name>.md --strict` — 必须 exit 0。
 
 ```markdown
-### <动词开头任务名,如"创建新员工账号">
+### 任务卡 1: <动词开头任务名,如"创建新员工账号">
 
 > ⚠️ **操作前必看**
 > - <权限要求 / 必备前提 / 重要后果 / 时间窗口>
@@ -487,6 +487,13 @@ narration_rate: "+0%"  # 可选,语速调节
 
 - [另一张任务卡](#...)
 ```
+
+**v0.5.2: 任务卡 heading 严格格式** —— 每张任务卡的标题**必须**是 `### 任务卡 N: <title>`,N 从 1 开始按文档顺序递增。这样:
+- 任务卡与 Q&A 等其他 H3 段(`### 权限类` / `### 词汇表`)在 viewer 左侧 TOC 视觉上分组明显
+- 数字编号让"读法指南"里的"看任务卡 3"和"相关任务"链接可点击跳转
+- 失败反例(LLM 容易写错):`### 创建合同`(无编号)、`### 任务卡 创建合同`(空格不是冒号)、`### 任务卡1:创建合同`(冒号前无空格)
+
+**v0.5.2: 步骤块必须用 `#### 步骤` 包裹** —— 失败反例:直接写 `1. 步骤 1\n2. 步骤 2` 数字行(无标题),这样在 viewer 左侧 TOC 里看不到"步骤"节点,且 §2.4 "极简语法"检查识别不到。成功格式:空行 → `#### 步骤` 标题 → 数字列表 → 空行 → `#### 成功后看到`。
 
 **必含字段**:7 个(`适用角色 / 前置条件 / 入口 / 步骤 / 成功后看到 / 字段说明 / 如果你卡住了`)+ `相关任务`(可选,推荐) = 实际 8 字段。
 
@@ -624,7 +631,13 @@ python3 -m manual_helper fill-citation-shas docs/user-manual/manual/<name>.md
 
 ## 6. Citations 幂等性账本
 
-每本分册末尾固定有 `## Citations`,两张子表:
+**v0.5.2: Citations 段默认关闭,opt-in。** 它是给代码审查 / SHA 跟踪用的,不是给最终用户看的。
+
+- **默认行为**(`manual-config.json` 不写 `include_citations`):LLM **不**在分册末尾生成 `## Citations` 段。skill 端 helper 仍然扫描制品并算 SHA(在 `_internal/citations.json` 里),但 markdown 不渲染。
+- **打开方式**:`manual-config.json` 顶层加 `"include_citations": true`(适用做合规审计的项目,需要可追溯到具体 spec SHA)。
+- **强制必含**:如果开了,LLM 写完**必须**跑 `python3 -m manual_helper fill-citation-shas <this.md>` 把 `(auto)` 占位替换成真 SHA,否则 validate FAIL。
+
+若项目开了 Citations,每本分册末尾固定有 `## Citations`,两张子表:
 
 ### 6.1 Project artifacts
 
