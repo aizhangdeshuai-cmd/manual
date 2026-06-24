@@ -9,10 +9,12 @@ The two-step pipeline matches real recorder data:
      silence gaps. Gap length is configurable; default 2.0s gives the viewer
      time to "look at the screenshot, then listen to the next step".
   2. `mux_narration_with_video`: prepend the (possibly gappy) narration to a
-     Playwright-recorded webm/mp4 via `ffmpeg -stream_loop -1 -i video -i audio`.
-     The `-stream_loop -1` lets the video loop if narration is longer; the
-     `-shortest` flag on the output handles narration-shorter-than-video.
-     Together: whichever is shorter wins, the other is looped/trimmed.
+     Playwright-recorded webm/mp4 via `ffmpeg -i video -i audio`. We always
+     set `-t <out_dur>` where `out_dur = min(vid_dur, audio_dur)`, so the
+     video is NEVER looped — the user sees the recorded operation exactly
+     once, even if narration is longer. See v0.3.6 changelog for the bug
+     this contract fixed (the v0.3.2-v0.3.5 design looped the video and
+     caused 视频内容在重复).
 
 Why two functions instead of one combined call:
   - Stage 1 produces an inspectable intermediate (you can `ffprobe` it,
@@ -22,7 +24,9 @@ Why two functions instead of one combined call:
 
 Both stages are subprocess-based ffmpeg calls; we don't link libav.
 
-v0.3.2 — first version.
+v0.3.6 — never loop the video. Output duration = min(vid_dur, audio_dur);
+  the previous `stream-loop -1` design caused the user to see the same
+  operation N times in a row, reported as "视频内容在重复".
 """
 from __future__ import annotations
 import json
@@ -148,13 +152,23 @@ def mux_narration_with_video(
         webm input, CRF 23, faststart enabled for HTTP streaming).
       - audio: from `audio_path` (encoded as AAC 128k).
 
-    Behavior when lengths differ:
-      - If narration is LONGER than video: video is looped via
-        `-stream_loop -1` until narration finishes. The user sees a looped UI
-        until the voiceover ends — acceptable for short business-manual clips.
-      - If narration is SHORTER than video: `-shortest` trims the trailing
-        video frames that have no narration. The user sees the full recorded
-        flow, voiceover ends, video cuts.
+    Behavior when lengths differ (v0.3.6 contract — NEVER loop the video):
+      - If narration is LONGER than video: the trailing narration is TRIMMED.
+        The user sees the full recorded operation exactly once, voiceover
+        ends naturally when the action ends. No `stream-loop` is used.
+      - If narration is SHORTER than video: the trailing video frames are
+        KEPT (via the `out_dur` flag). The user sees the full recorded flow,
+        voiceover ends mid-flow, video continues silently until the action
+        ends — this preserves the "human recording" feel and matches the
+        standalone recording's natural end-of-action tail.
+
+    Why we don't loop the video:
+      The previous v0.3.2-v0.3.5 design used `stream-loop -1` to make a
+      short video fill a long narration. The user reported "视频内容在重复"
+      (video content repeats) — a 3.5s login clip with 14.8s of narration
+      showed the login form 4 times back-to-back. For human-facing manuals,
+      seeing the same action N times is a worse experience than ending the
+      clip when the action ends. The recorder is for manuals, not audiobooks.
 
     Args:
         video_path: input video (webm from Playwright, or mp4 from earlier step).
@@ -178,10 +192,8 @@ def mux_narration_with_video(
     out.parent.mkdir(parents=True, exist_ok=True)
 
     # Probe both inputs so we can decide whether to loop the video.
-    # v0.3.2 fix: -stream_loop -1 + -shortest is the right combo when audio
-    # is LONGER than video, but when audio is SHORTER, the unconditional loop
-    # interacts badly with -shortest (the looped video "ends" mid-audio and
-    # ffmpeg picks a wrong cutoff). So we only loop when audio > video.
+    # v0.3.6: dropped the loop-vs-shortest decision entirely. We always
+    # use a fixed `-t out_dur` where out_dur = min(vid_dur, audio_dur).
     from recorder_plugin.video import get_video_info  # local import, no cycle
     try:
         vid_dur = get_video_info(v)["duration_s"]
@@ -200,24 +212,32 @@ def mux_narration_with_video(
             f"mux_narration_with_video: cannot read audio duration: {audio_probe.stdout!r}"
         ) from e
 
-    # v0.3.2 fix (round 2): the original design used `-shortest` to pick
-    # the shorter of the two streams, but `-stream_loop -1 + -shortest`
-    # produces 10s+ output for an 8s-audio / 5s-video pair (a known ffmpeg
-    # loop-boundary + keyframe-alignment issue). The bullet-proof solution is
-    # to ALWAYS pass `-t audio_dur`, and only loop the video when audio is
-    # longer. Then both cases converge to exactly audio_dur output.
-    loop_video = audio_dur > vid_dur
+    # v0.3.6 fix: NEVER loop the video. The user sees the recorded
+    # operation once; narration is the part that gets stretched or
+    # trimmed. The previous "loop video to fill long narration" approach
+    # made the user watch the same login form 4 times in a row, which
+    # looked like a bug ("重复登录") even though it was technically
+    # correct muxing. The recorder is for human-facing manuals, not
+    # audiobooks — a tight clip that ends when the action ends is more
+    # useful than a stretched clip that fills the voiceover.
+    #
+    # Output duration = min(vid_dur, audio_dur):
+    #   - video shorter than narration → trim the trailing silence/text
+    #     (the user sees the full operation; voiceover may cut mid-sentence
+    #     on the last segment, but that's OK — the next segment starts
+    #     with silence, not with a truncated phrase)
+    #   - video longer than narration → keep the trailing video frames
+    #     (the user sees the full operation; voiceover ends naturally)
+    out_dur = min(vid_dur, audio_dur)
 
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
-    if loop_video:
-        cmd += ["-stream_loop", "-1"]
     cmd += ["-i", str(v), "-i", str(a)]
     cmd += [
         "-map", "0:v:0", "-map", "1:a:0",
         "-c:v", "libx264", "-preset", "medium", "-crf", "23",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k",
-        "-t", f"{audio_dur:.3f}",
+        "-t", f"{out_dur:.3f}",
         "-movflags", "+faststart",
         str(out),
     ]

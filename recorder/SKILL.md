@@ -120,6 +120,32 @@ python3 -m recorder_plugin.cli concat-narration nar1.mp3 nar2.mp3 --out full.mp3
 python3 -m recorder_plugin.cli mux-audio recording.webm full.mp3 --out with-voice.mp4
 ```
 
+#### v0.3.6 — Narration is trimmed, never stretched by looping the video
+
+If the synthesized narration is **longer** than the recorded video, the trailing
+narration is **trimmed** to the video length. The output mp4 plays the
+recorded action exactly once; the voiceover ends when the action ends.
+
+**Why not loop the video?** The v0.3.2-v0.3.5 design used ffmpeg's
+`-stream_loop -1` to make a short video fill a long voiceover. The user
+reported 视频内容在重复 (video content repeats): a 3.5s login clip with
+14.8s of narration played the login form 4 times back-to-back. For
+human-facing manuals, seeing the same action N times is worse than
+ending the clip when the action ends. Output duration is now always
+`min(vid_dur, audio_dur)`; the video is the canonical timeline.
+
+**Tuning options** (in the recorder step or CLI):
+- Shorter narration segments → fewer words per segment so narration
+  roughly matches the action's natural length.
+- Lower `narration_rate` (e.g. `-15%`) → compresses timing without
+  cutting content.
+- Trim `narration_gap` from 2.0 to 1.0 or 0.5 → 2-3 segments with
+  default 1.5s/segment audio budget fit a 3-5s action.
+
+**Tested by**: `recorder/tests/unit/test_no_video_loop.py` (3 tests,
+locked in v0.3.6). See also `test_narration.py::TestMuxAudio` for the
+end-to-end audio+video duration contract.
+
 ### `ai_annotate` step (v0.2.4 — agent-mediated, provider-agnostic)
 
 The `ai_annotate` step writes a request file and **does not** call any LLM. The recorder never depends on a specific vision provider.

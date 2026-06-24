@@ -101,11 +101,15 @@ class TestMuxAudio(unittest.TestCase):
             concat_segments_with_gaps([missing], self.tmp / "x.mp3")
 
     def test_mux_audio_longer_loops_video_to_audio(self) -> None:
-        """Audio longer than video → video is looped, output == audio_dur.
+        """Audio longer than video → narration is trimmed, output == video_dur.
 
-        v0.3.2 (round 2): we use `-t <audio_dur>` rather than `-shortest` so
-        both "audio longer" and "audio shorter" cases converge to exactly
-        audio_dur output (avoids ffmpeg's stream_loop + -shortest boundary bug).
+        v0.3.6: the v0.3.2-v0.3.5 contract ("loop the video to fill the
+        narration, output = audio_dur") was reverted. The new contract is
+        "never loop the video; output = min(vid_dur, audio_dur)". This
+        matches the recorder's purpose: human-facing manuals, not audiobooks.
+        The user reported the old behavior as 视频内容在重复 (video repeats)
+        because a 3.5s login clip with 14.8s of narration played the login
+        form 4 times back-to-back.
         """
         from recorder_plugin.mux_audio import generate_silence_mp3, mux_narration_with_video
         # 8s audio > 5s video
@@ -119,8 +123,10 @@ class TestMuxAudio(unittest.TestCase):
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
             "-of", "csv=p=0", str(out),
         ], capture_output=True, text=True, check=True)
-        # Output duration == audio duration (8s), NOT video (5s)
-        self.assertAlmostEqual(float(info.stdout.strip()), 8.0, delta=0.5)
+        # Output duration == min(vid_dur, audio_dur) = 5s (the video),
+        # NOT audio (8s) and NOT a looped 8s of the video. Narration is
+        # trimmed; user sees the action once.
+        self.assertAlmostEqual(float(info.stdout.strip()), 5.0, delta=0.5)
 
     def test_mux_missing_video_raises(self) -> None:
         from recorder_plugin.mux_audio import generate_silence_mp3, mux_narration_with_video

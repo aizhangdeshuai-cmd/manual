@@ -1,3 +1,41 @@
+## 0.3.6 (2026-06-24) — never loop the video to fill narration
+
+### Bug fix: 视频内容在重复
+
+The v0.3.2-v0.3.5 design of `mux_narration_with_video` used ffmpeg's
+`-stream_loop -1` to make a short recorded video fill a long narration.
+For a 3.5s login clip with 14.8s of narration, the user saw the login form
+4 times back-to-back — reported as 视频内容在重复 (video content repeats).
+For human-facing manuals, the same action playing N times is worse than
+ending the clip when the action ends.
+
+### Contract change
+
+`mux_narration_with_video` now always uses
+`out_dur = min(vid_dur, audio_dur)` and never uses `-stream_loop`.
+
+- Narration longer than video → trailing narration is trimmed. User sees
+  the full recorded action exactly once.
+- Narration shorter than video → trailing video frames are kept (silent).
+  User sees the full recorded action; voiceover ends mid-flow naturally.
+
+### New tests
+
+- `recorder/tests/unit/test_no_video_loop.py` — 3 tests locking in the
+  no-loop contract (157 recorder unit tests total, was 154).
+
+### Updated tests
+
+- `tests/unit/test_narration.py::TestMuxAudio::test_mux_audio_longer_loops_video_to_audio`
+  — renamed intent; now asserts output == video_dur when audio_dur > video_dur.
+
+### Files
+
+- `recorder/recorder_plugin/mux_audio.py` — dropped loop decision; updated
+  module/function docstrings to reflect the new contract.
+- `recorder/VERSION` — bumped 0.3.5 → 0.3.6.
+- `recorder/SKILL.md` — added v0.3.6 sub-section under "### Narration".
+
 ## 0.3.2 (2026-06-18) — video narration (TTS voiceover)
 
 ### Headline feature: TTS + ffmpeg mux on `video_stop`
