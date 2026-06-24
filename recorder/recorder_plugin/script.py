@@ -283,7 +283,7 @@ async def _handle_video_start(rec: Recorder, step: dict, name_to_path: dict) -> 
 
 async def _handle_video_stop(
     rec: Recorder, step: dict, name_to_path: dict, output_dir: Path,
-    *, reopen_after_video: bool = False,
+    *, reopen_after_video: bool = False, preserve_session: bool = False,
 ) -> AssetRef:
     """v0.2.1: slice the recorded webm, concat into one MP4, return reference.
 
@@ -301,10 +301,31 @@ async def _handle_video_stop(
     if not rec_dir:
         return AssetRef(path=output_dir / f"{name}.mp4", kind="video_slice", size_bytes=0)
 
-    # Flush the webm: close the page that was active during recording.
+    # v0.3.5: capture localStorage BEFORE closing the recording page,
+    # so we can replay it on the fresh page that replaces the closed one.
+    # This is what lets cross-video flows stay logged in (and skip the
+    # repeated-login intro that v0.3.3 forced on every video segment).
     name_key = f"_video_{name}"
     session = name_to_path.get(name_key, {})
     recording_page = session.get("recording_page") if isinstance(session, dict) else None
+    captured_storage: dict = {}
+    if preserve_session and recording_page is not None and not recording_page.is_closed():
+        try:
+            captured_storage = await recording_page.evaluate(
+                "() => { const out = {};"
+                " for (let i = 0; i < localStorage.length; i++) {"
+                "   const k = localStorage.key(i);"
+                "   out[k] = localStorage.getItem(k);"
+                " }"
+                " return out; }"
+            )
+        except Exception as e:
+            print(
+                f"WARNING: video_stop localStorage capture failed "
+                f"({type(e).__name__}: {e}); session won't be preserved.",
+                file=sys.stderr,
+            )
+    # Flush the webm: close the page that was active during recording.
     # v0.2.4 audit round 3 (H2): wrap page close in wait_for so a hung
     # Playwright teardown cannot block the whole script. TimeoutError
     # is logged as a warning — the webm may still flush from the
@@ -373,24 +394,36 @@ async def _handle_video_stop(
         rec._page = new_page
     except Exception:
         pass
-    # v0.3.3: opt-in re-navigation. See reopen_page_after_video docstring
-    # in run_script. Default is OFF — the script author is expected to
-    # `navigate` explicitly between videos. When ON, the fresh page is
-    # re-pointed at the URL that was active during recording.
+    # v0.3.5: replay localStorage onto the fresh page. Order matters:
+    #   1. Navigate to the recording origin (about:blank has no localStorage)
+    #   2. Write the captured keys
+    #   3. Reload so the app reads the restored localStorage on init
+    # This is what lets cross-video flows stay logged in (and skip the
+    # repeated-login intro that v0.3.3 forced on every video segment).
+    target_url = ""
+    base_url = ""
     if reopen_after_video and new_page is not None:
         target_url = session.get("recording_url", "") if isinstance(session, dict) else ""
         base_url = session.get("base_url", "") if isinstance(session, dict) else ""
-        if target_url and target_url != "about:blank":
-            try:
-                from urllib.parse import urljoin
-                full = urljoin(base_url, target_url) if base_url else target_url
-                await new_page.goto(full, wait_until="domcontentloaded")
-            except Exception as e:
-                print(
-                    f"WARNING: video_stop re-navigate to {target_url!r} failed "
-                    f"({type(e).__name__}: {e}); subsequent steps may fail.",
-                    file=sys.stderr,
-                )
+    if reopen_after_video and new_page is not None and target_url and target_url != "about:blank":
+        try:
+            from urllib.parse import urljoin
+            full = urljoin(base_url, target_url) if base_url else target_url
+            await new_page.goto(full, wait_until="domcontentloaded")
+            if preserve_session and captured_storage:
+                for k, v in captured_storage.items():
+                    await new_page.evaluate(
+                        "(args) => localStorage.setItem(args.k, args.v)",
+                        {"k": k, "v": v},
+                    )
+                # Reload so the app reads the restored localStorage on init
+                await new_page.reload(wait_until="domcontentloaded")
+        except Exception as e:
+            print(
+                f"WARNING: video_stop re-navigate to {target_url!r} failed "
+                f"({type(e).__name__}: {e}); subsequent steps may fail.",
+                file=sys.stderr,
+            )
 
     return asset
 
@@ -594,6 +627,16 @@ async def run_script(script_path: Path) -> dict:
     # apps (public marketing pages) but harmful for stateful apps
     # (Vue/React SPAs that lose in-memory auth on reload).
     reopen_after_video = bool(data.get("reopen_page_after_video", False))
+    # v0.3.5: opt-in session preservation across video_stop boundaries.
+    # When true, the recorder captures the recording page's localStorage
+    # BEFORE closing it (Playwright only flushes webm on page close),
+    # then replays the captured entries on the fresh page and reloads
+    # so the app's init code reads the restored state. This is what
+    # makes cross-video flows feel continuous instead of forcing a
+    # "log in again" intro on every segment. Requires the app to
+    # actually use localStorage for auth; in-memory auth needs the
+    # app to be edited to opt in.
+    preserve_session = bool(data.get("preserve_session", False))
 
     pending_annotations: list[dict] = []
     async with Recorder(
@@ -664,7 +707,7 @@ async def run_script(script_path: Path) -> dict:
                             "reason": "video session already validated; reused",
                         })
                         continue
-                    asset = await _handle_video_stop(rec, step, name_to_path, output_dir, reopen_after_video=reopen_after_video)
+                    asset = await _handle_video_stop(rec, step, name_to_path, output_dir, reopen_after_video=reopen_after_video, preserve_session=preserve_session)
                     # v0.3.2: optional narration. If the video_stop step carries
                     # `narration` (a list of strings, one per step), synthesize each
                     # segment, concatenate with gaps, then mux onto the recorded

@@ -1015,13 +1015,41 @@ Playwright 不解析相对 URL。`{ "action": "navigate", "url": "/" }` 会直�
 
 (v0.3.3 起 `Recorder.navigate` 会用 `urljoin` 把相对 URL 拼成绝对 URL,但脚本作者应**直接**写绝对 URL,避免依赖隐式 base。)
 
-### 16.2 `video_stop` 后页面是空白的(v0.2.1 设计权衡)
+### 16.2 跨 video 段保持登录态(v0.3.5)
 
-`video_stop` 必须关闭当前 page 来 flush Playwright 的 webm 流。关掉后会开一个新 page 替换,**新 page 默认是 about:blank**。
+`video_stop` 必须关闭当前 page 来 flush Playwright 的 webm 流,这是 Playwright 的硬约束。关掉之后新 page 默认是 about:blank + 内存态清零 — 对于把登录态放在内存的 SPA(Vue / React useState / 各种 zustand pinia),这等于强制每次 `video_stop` 后重新登录。
 
-- **后果**:`video_stop` 之后的所有步骤(`wait_for` / `click` / `type` / `screenshot`)都打在空白页上 → 全部失败。
-- **解决**:脚本作者必须在每个 `video_start` 前(除第一个外)显式插入 navigate + 重新登录(如果是有状态的 SPA)或 navigate 到目标 URL(如果是无状态的)。
-- **opt-in 自动重新导航**:脚本顶层加 `"reopen_page_after_video": true` 可让 recorder 自动把新 page `goto` 回录制时的 URL。**默认 false**。对 Vue/React 这类把登录态放在内存的 SPA 无效(刷新丢登录),但对纯静态页 / 用 cookie 鉴权的项目有用。
+**v0.3.5 修法**:`preserve_session: true`(opt-in,默认 false)。recorder 在关 page 前用 `page.evaluate` 抓 `localStorage` 全部键值,新 page 起来 + `goto` 到原 URL 后写回 + `reload` 触发 app 重新初始化读 localStorage。
+
+**前置条件**:app 必须把登录态持久化到 `localStorage`(Vue 用 `watch(user, ...)` 写,React 用 effect 写)。如果 app 把登录态纯放内存,这个机制无效 — 修 app,不要指望 skill 兜底。
+
+典型用法(5 段 task-flow 录屏只录 1 次登录):
+
+```json
+{
+  "name": "myapp",
+  "url": "http://127.0.0.1:3000",
+  "reopen_page_after_video": true,
+  "preserve_session": true,
+  "output_dir": "...",
+  "steps": [
+    {"action": "navigate", "url": "http://127.0.0.1:3000/"},
+    {"action": "video_start", "name": "login"},
+    {"action": "type", "selector": "input[name=username]", "text": "..."},
+    {"action": "type", "selector": "input[name=password]", "text": "..."},
+    {"action": "click", "selector": "button[type=submit]"},
+    {"action": "wait_for", "selector": ".dashboard"},
+    {"action": "video_stop", "name": "login", "narration": ["..."]},
+    {"action": "video_start", "name": "create-task"},
+    ...                                       // 不需要重新登录
+    {"action": "video_stop", "name": "create-task", "narration": ["..."]}
+  ]
+}
+```
+
+**两个 flag 必须一起开**:`reopen_page_after_video: true` 负责新 page `goto` 到正确 URL(否则是 about:blank,localStorage 也写不进去),`preserve_session: true` 负责写回 localStorage 并 reload。
+
+**v0.3.3 时代的旧 workaround**(`video_start` 前手动插入 `navigate` + `type` + `click` + `wait_for` 重新登录)在 v0.3.5 已经**不必要**且**会重复登录** — 看到 5 段 video 开头都在输账号密码就是用旧脚本没升级。要不要这个新行为由 app 是否写 localStorage 决定,不是 skill 能强制的。
 
 ### 16.3 多元素 selector 直接抛 strict-mode 异常
 
