@@ -78,16 +78,97 @@ async def _handle_set_viewport(rec: Recorder, step: dict) -> None:
 
 
 async def _handle_click(rec: Recorder, step: dict) -> tuple[bool, str, int]:
+    """v0.3.4: move the mouse to the target first, then click.
+
+    v0.2.x used page.click() which teleports the cursor and clicks
+    in the same frame. The video then shows the page jumping from
+    A to B with no visible cursor travel, which looks like a demo
+    step rather than a real click. We now:
+      1. Resolve the selector
+      2. Move the mouse toward the target in a few visible hops
+      3. Hover ~150-300ms so the user sees the cursor arrive
+      4. Click
+
+    The agent can opt out with `instant_click: true` for steps where
+    cursor animation isn't useful (e.g. clicking an offscreen anchor
+    to scroll to a section).
+    """
+    import random
     resolver = SelectorResolver()
     selector = step["selector"]
     async def try_locator(variant: str):
-        await rec.page.click(variant, timeout=3000)
+        if step.get("instant_click"):
+            await rec.page.click(variant, timeout=3000)
+            return
+        # 1) Find the target and compute its center
+        loc = rec.page.locator(variant).first
+        await loc.wait_for(state="visible", timeout=3000)
+        box = await loc.bounding_box()
+        if box is None:
+            # Off-screen or hidden — fall back to teleport-click
+            await rec.page.click(variant, timeout=3000)
+            return
+        cx = box["x"] + box["width"] / 2
+        cy = box["y"] + box["height"] / 2
+        # 2) Move from current position to the target in 2-3 visible
+        #    hops. This produces a visible cursor trail in the video.
+        try:
+            cur = await rec.page.evaluate("() => ({ x: window.__lastMouseX ?? 0, y: window.__lastMouseY ?? 0 })")
+            sx, sy = cur.get("x", 0), cur.get("y", 0)
+        except Exception:
+            sx, sy = 0, 0
+        steps = random.randint(8, 18)
+        for i in range(1, steps + 1):
+            t = i / steps
+            # Ease-in-out cubic for a natural arc
+            e = t * t * (3 - 2 * t)
+            mx = sx + (cx - sx) * e + random.uniform(-2, 2)
+            my = sy + (cy - sy) * e + random.uniform(-2, 2)
+            await rec.page.mouse.move(mx, my)
+            await rec.page.wait_for_timeout(random.randint(8, 20))
+        # 3) Hover pause so the cursor sits on the target
+        await rec.page.wait_for_timeout(random.randint(120, 250))
+        # 4) Click
+        await rec.page.mouse.click(cx, cy)
+        # Record position for next time
+        try:
+            await rec.page.evaluate(
+                f"() => {{ window.__lastMouseX = {cx}; window.__lastMouseY = {cy}; }}"
+            )
+        except Exception:
+            pass
     ok, winning, attempts = await resolver.attempt_async(selector, try_locator)
     return ok, winning, attempts
 
 
 async def _handle_type(rec: Recorder, step: dict) -> None:
-    await rec.page.fill(step["selector"], step["text"])
+    """v0.3.4: type with realistic per-character delay.
+
+    v0.2.x used page.fill() which sets the value in a single frame, so
+    the recorded video shows text appearing all at once (looks like a
+    demo, not a real person typing). We now focus the element and
+    press one key at a time with a small per-character delay
+    (60-120ms, jittered) so the user sees the characters stream in
+    one-by-one, matching real touch-typing cadence.
+
+    The agent can opt out by setting `instant_type: true` for password
+    fields or other cases where animation isn't desired.
+    """
+    selector = step["selector"]
+    text = step["text"]
+    if step.get("instant_type"):
+        # Original fast path: single-frame fill. Used for passwords and
+        # other cases where per-char animation hurts more than helps.
+        await rec.page.fill(selector, text)
+    else:
+        # Click the field to focus, then type one char at a time.
+        # The click is on the same selector so it lands inside the input.
+        await rec.page.click(selector, timeout=3000)
+        import random
+        for ch in text:
+            # 60-120ms per char (avg ~90ms) — looks like fast typing.
+            delay_ms = random.randint(60, 120)
+            await rec.page.keyboard.type(ch, delay=delay_ms)
     if step.get("press_enter"):
         await rec.page.keyboard.press("Enter")
 
