@@ -6,6 +6,7 @@ doc embed. Uses the ffmpeg concat demuxer (requires intermediate concat list fil
 from __future__ import annotations
 import json
 import logging
+import sys
 import subprocess
 import tempfile
 from pathlib import Path
@@ -81,6 +82,148 @@ def slice_video(src: Path, out_dir: Path, slice_seconds: int = 10, output_stem: 
     return sorted(out_dir.glob(f"{stem}.*.webm"))
 
 
+def detect_first_content_timestamp(
+    video_path: Path,
+    *,
+    min_sat: float = 0.5,
+    check_seconds: float = 2.0,
+) -> float:
+    """v0.3.10: detect the first frame that has real content (not
+    a white blank) and return its timestamp in seconds. Used to
+    trim the leading blank frames that Playwright's recordVideo
+    captures when the page is still loading.
+
+    The signal: average frame SATAVG (saturation). A blank frame
+    (e.g. white background, no elements) has SATAVG=0. A rendered
+    page with any colored element (blue button, red ripple, etc.)
+    has SATAVG > 0.5. We scan the first `check_seconds` seconds of
+    the video at 1 frame / 40ms and return the timestamp of the
+    first frame where SATAVG > min_sat.
+
+    Why SATAVG (saturation) not YAVG (luminance): the test-app's
+    UI is a near-white background with a white card, so YAVG of a
+    loaded page (~228) and YAVG of a blank white frame (~235)
+    differ by only ~7 units -- too close to call reliably. SATAVG
+    of a blank frame is exactly 0 (no color); SATAVG of any
+    rendered page with the blue login button or red delete button
+    is > 0.5.
+
+    Returns 0.0 if no content frame is found in `check_seconds`
+    (caller should treat that as "don't trim" since the video
+    doesn't seem to have a leading blank).
+    """
+    import re as _re
+    import tempfile as _tempfile
+    with _tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as out:
+        meta_path = out.name
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(video_path),
+            "-t", str(check_seconds),
+            "-vf", "signalstats,metadata=print:file=" + str(meta_path),
+            "-an", "-f", "null", "-",
+        ]
+        subprocess.run(cmd, check=False, capture_output=True, text=True)
+        if not Path(meta_path).exists():
+            return 0.0
+        with open(meta_path) as f:
+            content = f.read()
+        blocks = _re.findall(
+            r"pts_time:([\d.]+).*?SATAVG=([\d.]+)",
+            content, flags=_re.DOTALL,
+        )
+        for ts_str, sat_str in blocks:
+            try:
+                sat = float(sat_str)
+            except ValueError:
+                continue
+            if sat > min_sat:
+                return float(ts_str)
+        return 0.0
+    finally:
+        Path(meta_path).unlink(missing_ok=True)
+
+
+def trim_blank_start(
+    video_path: Path,
+    *,
+    min_sat: float = 0.5,
+    check_seconds: float = 2.0,
+    max_passes: int = 3,
+) -> float:
+    """v0.3.10: trim the leading blank frames from a recorded
+    video in-place. Returns the number of seconds trimmed (0 if
+    no blank frames found).
+
+    The Playwright `recordVideo` API starts recording when the
+    context is created, BEFORE the page navigates and before the
+    SPA bundle has finished loading. The result is 80-300ms of
+    blank white frames at the start of every video. To a viewer
+    this reads as "the recording is broken" -- the video starts
+    with nothing, then content appears.
+
+    Fix: detect the first content frame via
+    detect_first_content_timestamp() and re-encode the video
+    starting from that timestamp, using ffmpeg's `trim` video
+    filter (not `-ss`). The filter is frame-accurate — it does
+    NOT depend on keyframe placement, so the new mp4's first
+    frame is guaranteed to be the content frame.
+
+    Why not `ffmpeg -ss <ts> -i <input>`: that's fast-seek — it
+    snaps to the nearest keyframe BEFORE the target ts, which
+    means the new mp4 can still start with a blank keyframe. We
+    tried it in v0.3.10a and the first frame was still blank
+    even though the duration had been correctly trimmed.
+
+    Iterates up to `max_passes` times: after each trim, we
+    re-detect the first content frame. If the new mp4 still
+    has a blank keyframe at the start, we trim again. In
+    practice 1-2 passes is enough.
+
+    Non-destructive: writes to <video_path>.trimmed.mp4, then
+    atomically replaces the original. If the detect step finds
+    no content frame (very rare -- the video is entirely blank),
+    we leave the original alone.
+    """
+    total_trimmed = 0.0
+    for pass_idx in range(max_passes):
+        trim_ts = detect_first_content_timestamp(
+            video_path, min_sat=min_sat, check_seconds=check_seconds,
+        )
+        if trim_ts <= 0.01:
+            # No more leading blank frames — done.
+            break
+        tmp_out = video_path.with_suffix(".trimmed.mp4")
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(video_path),
+            "-vf", f"trim=start={trim_ts:.3f},setpts=PTS-STARTPTS",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            "-an",  # recorder videos are silent; the silent track would
+                    # be misaligned after trim, so drop it.
+            str(tmp_out),
+        ]
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        if result.returncode != 0 or not tmp_out.exists():
+            print(
+                f"WARNING: trim_blank_start pass {pass_idx+1} failed for "
+                f"{video_path.name} (returncode={result.returncode}); "
+                f"keeping current video.",
+                file=sys.stderr,
+            )
+            if tmp_out.exists():
+                tmp_out.unlink()
+            return total_trimmed
+        tmp_out.replace(video_path)
+        total_trimmed += trim_ts
+    return total_trimmed
+
+
+
+
 def concat_slices_to_mp4(
     slice_paths: list[Path],
     output_mp4: Path,
@@ -88,6 +231,7 @@ def concat_slices_to_mp4(
     crf: int = 23,
     preset: str = "medium",
     audio: bool = True,
+    trim_leading_blank: bool = True,
 ) -> Path:
     """Concatenate N webm slices into a single MP4 (libx264).
 
@@ -101,6 +245,13 @@ def concat_slices_to_mp4(
         preset: libx264 speed/quality tradeoff (ultrafast → veryslow).
         audio: include audio stream (default True; recorder captures no audio, so
             this typically produces a silent track).
+        trim_leading_blank: v0.3.10 — if True (default), detect the first
+            content frame via SATAVG and re-encode starting from
+            there. Eliminates the 80-300ms of blank-white frames at
+            the start that Playwright's recordVideo captures during
+            page load. Renamed from `trim_blank_start` in v0.3.10
+            because that name shadowed the module-level
+            `trim_blank_start()` function.
 
     Returns: path to the written MP4.
     """
@@ -144,6 +295,30 @@ def concat_slices_to_mp4(
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
     finally:
         concat_list.unlink(missing_ok=True)
+
+    # v0.3.10: trim the leading blank frames. Playwright's
+    # recordVideo starts recording at context creation, BEFORE
+    # the page navigates and the SPA bundle has loaded. The
+    # resulting 80-300ms of blank-white frames at the start of
+    # every video make it look like the recording is broken.
+    # trim_blank_start() detects the first frame with real
+    # content (SATAVG > 0.5) and re-encodes starting from there.
+    if trim_leading_blank:
+        try:
+            trimmed = trim_blank_start(output_mp4)
+            if trimmed > 0:
+                print(
+                    f"INFO: trimmed {trimmed:.2f}s of leading blank frames "
+                    f"from {output_mp4.name}",
+                    file=sys.stderr,
+                )
+        except Exception as e:
+            # Non-fatal — keep the un-trimmed video if trim fails.
+            print(
+                f"WARNING: trim_blank_start failed for {output_mp4.name} "
+                f"({type(e).__name__}: {e}); keeping un-trimmed video.",
+                file=sys.stderr,
+            )
 
     return output_mp4
 

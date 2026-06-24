@@ -120,6 +120,47 @@ python3 -m recorder_plugin.cli concat-narration nar1.mp3 nar2.mp3 --out full.mp3
 python3 -m recorder_plugin.cli mux-audio recording.webm full.mp3 --out with-voice.mp4
 ```
 
+#### v0.3.10 — Frame-accurate trim of leading blank frames
+
+Every recorded video started with 40-300ms of a blank white
+frame at the front. To a viewer this read as "the recording
+is broken" — the video began with nothing, then the page
+appeared. Caused by Playwright's `recordVideo` API starting
+recording at context creation, BEFORE the page navigated
+and the SPA bundle loaded.
+
+v0.3.10 detects the first content frame (SATAVG > 0.5) and
+re-encodes the video starting from there, using ffmpeg's
+`trim` video filter. Frame-accurate, no keyframe dependency.
+
+**Why the `trim` filter, not `ffmpeg -ss <ts> -i <input>`**:
+the latter is **fast-seek** — it snaps to the nearest
+keyframe BEFORE the target ts. If that keyframe is blank
+(e.g. the first I-frame is white), the trimmed mp4 STILL
+starts with a blank frame. The `trim` filter decodes
+through to the target ts and emits the content frame as
+the new first frame. See
+`tests/unit/test_video.py::test_trim_blank_start_first_frame_has_content`
+for the regression test.
+
+**Why SATAVG (saturation), not YAVG (luminance)**: the
+test-app's UI is a near-white background with a white card
+— YAVG of a loaded page (~228) and YAVG of a blank white
+frame (~235) differ by only 7 units, too close to call
+reliably. SATAVG of a blank frame is exactly 0; SATAVG of
+any rendered page with a colored element is > 0.5.
+
+The new `trim_blank_start()` in `video.py` iterates up to 3
+passes: after each trim, re-detect; if the new mp4 still
+has a blank keyframe at the start, trim again. In practice
+1-2 passes is enough.
+
+API: `concat_slices_to_mp4(..., trim_leading_blank: bool = True)`.
+The previous param name `trim_blank_start` shadowed the
+module-level `trim_blank_start()` function and crashed with
+`TypeError: 'bool' object is not callable` — renamed in
+this release.
+
 #### v0.3.9 — Human-looking cursor (smooth motion, idle-fade, nav-aware)
 
 v0.3.8 shipped a cursor that was visible but had five "demo"

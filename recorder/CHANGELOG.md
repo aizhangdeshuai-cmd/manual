@@ -1,3 +1,79 @@
+## 0.3.10 (2026-06-24) — frame-accurate trim of leading blank frames
+
+Every recorded video started with 40-300ms of a blank white
+frame at the front. To a viewer this read as "the recording
+is broken" — the video began with nothing, then the page
+appeared. Caused by Playwright's `recordVideo` API starting
+recording at context creation, BEFORE the page navigated
+and the SPA bundle loaded.
+
+v0.3.10 detects the first content frame (SATAVG > 0.5) and
+re-encodes the video starting from there, using ffmpeg's
+`trim` video filter (frame-accurate, no keyframe dependency).
+The first frame of the trimmed mp4 is guaranteed to be real
+content.
+
+### What changed
+
+#### video.py
+
+- **`detect_first_content_timestamp()`** — new. Scans the
+  first 2s of a video with ffmpeg `signalstats`, returns
+  the timestamp of the first frame whose SATAVG > 0.5.
+  Signal: **SATAVG (saturation)**, not YAVG (luminance),
+  because the test-app's UI is a near-white background with
+  a white card — YAVG of a loaded page (~228) and YAVG of
+  a blank white frame (~235) differ by only 7 units. SATAVG
+  of a blank frame is exactly 0; SATAVG of any rendered
+  page with a colored element is > 0.5.
+
+- **`trim_blank_start()`** — new. Re-encodes the video
+  starting from the detected timestamp using
+  `trim=start=<ts>,setpts=PTS-STARTPTS`. Iterates up to 3
+  passes: after each trim, re-detect; if the new mp4 still
+  has a blank keyframe at the start, trim again. In practice
+  1-2 passes is enough.
+
+  - **Why the `trim` filter, not `ffmpeg -ss <ts> -i <input>`**:
+    `-ss` before `-i` is **fast-seek** — it snaps to the
+    nearest keyframe BEFORE the target ts. If that keyframe
+    is blank (e.g. the first I-frame is white), the trimmed
+    mp4 STILL starts with a blank frame. We hit exactly
+    this bug in v0.3.10a: the trim duration dropped, but
+    `frame 0` of the trimmed mp4 was still blank. The
+    `trim` filter doesn't depend on keyframe placement —
+    it decodes through to the target ts and emits the
+    content frame as the new first frame.
+
+- **`concat_slices_to_mp4()`** — new param
+  `trim_leading_blank: bool = True`. When True (default),
+  the concat output is trimmed of leading blank frames
+  via `trim_blank_start()`. Renamed from the previous
+  `trim_blank_start` because the param name shadowed the
+  module-level `trim_blank_start()` function (the param
+  bound `True`, then `trim_blank_start(output_mp4)` tried
+  to call it and got `TypeError: 'bool' object is not
+  callable`). v0.3.10a hit this shadowing bug, fixed in
+  this release.
+
+#### tests
+
+- `tests/unit/test_video.py`:
+  - `test_trim_blank_start_first_frame_has_content` (new) —
+    the regression test. Builds a 1s video that starts with
+    0.3s of white, then 0.7s of blue. After `trim_blank_start()`,
+    asserts the first frame's SATAVG > 0 (i.e. is the blue
+    frame, not a residual white keyframe). This is the test
+    that would have caught the v0.3.10a keyframe-seek bug.
+
+- `tests/integration/test_self_test.py`:
+  - Bumped hardcoded `0.3.0` to `0.3.10` in
+    `test_all_modules_importable` and
+    `test_cli_help_and_version` (these asserted the
+    package version string was exactly `0.3.0` from
+    v0.2.1 days, had been broken since the first version
+    bump that wasn't followed up).
+
 ## 0.3.9 (2026-06-24) — human-looking cursor: smooth motion, idle-fade, nav-aware
 
 The v0.3.8 cursor was visible but had five "demo" tells that

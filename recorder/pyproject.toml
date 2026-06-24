@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "user-manual-recorder"
-version = "0.3.9"  # human-looking cursor: CSS transition + idle-fade + nav-aware
+version = "0.3.10"  # frame-accurate trim: use `trim` video filter, not `-ss` fast-seek
 description = "Opt-in recorder plugin for the user-manual skill"
 requires-python = ">=3.10"
 dependencies = [

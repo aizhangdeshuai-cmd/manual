@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 def test_all_modules_importable():
     """Every recorder_plugin module imports cleanly."""
     from recorder_plugin import __version__
-    assert __version__ == "0.3.0", f"expected version 0.3.0, got {__version__}"
+    assert __version__ == "0.3.10", f"expected version 0.3.10, got {__version__}"
 
     import recorder_plugin.core
     import recorder_plugin.state
@@ -59,7 +59,7 @@ def test_cli_help_and_version():
         [sys.executable, "-m", "recorder_plugin.cli", "--version"],
         capture_output=True, text=True, check=True,
     )
-    assert out_ver.stdout.strip() == "0.3.0"
+    assert out_ver.stdout.strip() == "0.3.10"
 
 
 def test_mcp_tools_count():
