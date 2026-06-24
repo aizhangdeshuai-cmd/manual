@@ -1,3 +1,140 @@
+## 0.3.8 (2026-06-24) — cursor overlay actually follows the mouse + keystroke HUD + click ripples
+
+### Bug
+
+v0.3.7's cursor overlay was **visible but frozen at the inject
+position** (50% 50% of the viewport). The `mousemove` listener
+updated `window.__lastMouseX/Y` correctly, but never moved the
+overlay's `left/top`, so the recorded webm showed a static
+arrow with the user typing around it — even more "demo-ish"
+than no cursor at all.
+
+A second, deeper bug: the listener was registered in
+`_handle_video_start` via `install(rec.page)`, which calls
+`page.add_init_script()`. `addInitScript` only fires on
+**subsequent** navigations, but the recording page had
+already navigated to the app by the time `video_start`
+fired, so the listener was never installed for the actual
+recording session. This is why抽帧 showed no cursor at all
+on the first real-screen tap of v0.3.7.
+
+### Fix
+
+Two-part architecture, pattern adapted from
+[snomiao/demowright](https://github.com/snomiao/demowright)
+(MIT, 2026):
+
+1. **Listener** runs as `addInitScript` and only updates a
+   state object on `window.__recHud` — never touches the DOM.
+   Safe to register before any `<body>` exists.
+2. **DOM injector** runs as `page.evaluate` after the page
+   is loaded. Creates the visible cursor, click-ripple host,
+   and keystroke HUD elements, and wires them to the state
+   via callback functions: `state.onCursorMove`,
+   `state.onMouseDown`, `state.onKeyDown`.
+
+The wiring step is what fixes the v0.3.7 frozen-cursor bug:
+the cursor's `transform: translate(x, y)` is set by the
+callback, not by the listener — so every `mousemove` event
+*visually* moves the cursor, with no race against DOM readiness.
+
+The install call now happens in `Recorder.start()` at the
+**context** level (`self._context.add_init_script(LISTENER_JS)`)
+BEFORE any `new_page`, guaranteeing the listener is active
+from the very first navigation.
+
+### Gotcha worth flagging in code review
+
+`page.add_init_script()` requires **plain statements**, NOT a
+wrapped arrow function. Playwright double-wraps its input:
+`(() => { <your code> })()`. If you pass
+`add_init_script("() => { window.x = 1 }")`, the runtime sees
+`(() => { () => { window.x = 1 } })()` and the inner arrow
+never runs. Pass the body directly:
+
+```python
+# WRONG — listener never registers
+await page.add_init_script("() => { window.addEventListener(...) }")
+
+# RIGHT — listener registers on every navigation
+await page.add_init_script("window.addEventListener(...)")
+```
+
+This is the same reason the listener lives in a separate
+`LISTENER_JS` constant in `cursor.py` and is exposed as a
+`test_listener_uses_addinit_compatible_pattern` unit test —
+the regression risk is real and easy to introduce.
+
+### New features in this release
+
+- **Click ripple**: a brief expanding ring at the click
+  position, ~200ms animation. Reinforces "the click happened
+  here" so the user doesn't have to look at the cursor + the
+  button state change simultaneously.
+- **Keystroke HUD**: a small row of key chips at the bottom
+  of the screen, one per `keydown`, fading after 1.5s. Lets
+  the user follow along with "type the password `admin`"
+  instructions even when the password is masked to dots.
+- **Last-5 keys trailing**: only the 5 most recent keys are
+  shown, so the HUD doesn't grow off-screen for long forms.
+
+### New / changed files
+
+- `recorder/recorder_plugin/cursor.py` — rewritten, 342 lines.
+  New API: `install(page)`, `inject_overlay(page)`,
+  `remove_overlay(page)`. Old names (`inject_cursor`,
+  `remove_cursor`, `start_tracking`, `stop_tracking`,
+  `get_trail`) kept as backwards-compat aliases.
+- `recorder/recorder_plugin/script.py` — `video_start` now
+  calls `install(rec.page)` (idempotent — page is reused) +
+  `inject_overlay(rec.page)`. `video_stop` calls
+  `remove_overlay`.
+- `recorder/recorder_plugin/core.py` — `Recorder.start()`
+  calls `self._context.add_init_script(LISTENER_JS)` BEFORE
+  `new_context` returns. This is the fix for the
+  addInitScript-after-navigation bug.
+- `recorder/tests/unit/test_cursor.py` — 11 tests (was 10).
+  Added `test_install_survives_navigation` (the regression
+  test for the addInitScript gotcha) and
+  `test_listener_uses_addinit_compatible_pattern` (asserts
+  the listener body is plain statements, not wrapped).
+  Recorder unit-test count: 168 (was 157 in v0.3.6, 158 in
+  v0.3.7… the handoff reports 168; double-checked in
+  `pytest tests/unit`).
+- `recorder/VERSION` — 0.3.7 → 0.3.8.
+
+### Upgrade notes
+
+`is_video_session_valid()` reuses previously-recorded mp4s
+when the script+app config match. After upgrading to v0.3.8,
+clear the recorder state cache to force a fresh re-record:
+
+```bash
+SYS=<project>/docs/user-manual/screenshots/sys
+rm -f $SYS/.recorder_state.json
+rm -rf $SYS/_video_buffer $SYS/_narration_segments
+for f in <flow1> <flow2> ...; do
+  rm -rf "$SYS/$f" "<project>/docs/user-manual/screenshots/task/$f"
+done
+rm -f $SYS/*.narration.mp3 $SYS/*.png
+rm -f <project>/docs/user-manual/screenshots/task/*.png
+rm -rf <project>/docs/user-manual/assets/videos
+```
+
+Otherwise the v0.3.7 mp4s (frozen-cursor) will be reused as
+"valid" and the bug will appear to still be present.
+
+### Credits
+
+Cursor-overlay architecture adapted from
+[snomiao/demowright](https://github.com/snomiao/demowright)
+(MIT license, 2026). The two-piece addInitScript + callback-
+wired DOM injector pattern is demowright's original design.
+We use a different rendering style (CSS `transform: translate`
+on a 14×20 SVG, not a `canvas`) because Playwright's
+`recordVideo` captures the DOM as a sequence of frames and
+we want zero post-processing. The keystroke HUD + click
+ripple additions are original to this skill.
 ## 0.3.7 (2026-06-24) — visible cursor overlay in recorded video
 
 ### Headline feature: in-page SVG cursor for human-looking recordings

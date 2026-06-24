@@ -1,33 +1,44 @@
-"""v0.3.7: inject a visible cursor overlay into the recorded page.
+"""v0.3.8: visible cursor + keystroke badges + click ripples in recorded video.
 
 Why we need this:
-  Playwright's `recordVideo` records the page DOM, not the OS cursor.
-  In headless mode there is no real OS cursor to render. Without an
-  in-page cursor, the recorded video shows clicks happening "out of
-  nowhere" — the user sees a button change state but no pointer
-  arriving at it. That's the difference between "looks like a demo"
-  and "looks like a real person using the app".
+  Playwright's `recordVideo` captures the page DOM, not the OS cursor.
+  In headless mode there is no OS cursor to render, so the recorded
+  webm shows clicks happening "out of nowhere". Without visual feedback,
+  the user can't tell what was clicked or what was typed.
 
 What this module does:
-  - inject_cursor(page): append a fixed-position <div id="__rec_cursor__">
-    to the page, containing an SVG arrow. The element has
-    `pointer-events: none` so it never blocks real clicks/typing.
-  - move_cursor(page, x, y): update the overlay's left/top to track
-    the mouse. Cheap — sets two CSS properties via DOM.
-  - start_tracking(page): install a `mousemove` listener on the page
-    that records positions into window.__recCursorTrail (a list of
-    {x,y,t}). Used by the recorder's click handler so the cursor
-    moves naturally between actions (not just teleporting on click).
-  - stop_tracking(page) / remove_cursor(page): cleanup.
+  1. install(page): addInitScript that runs on every navigation. The
+     script attaches mousemove/mousedown/mouseup/keydown listeners
+     that update a state object on window.__recHud. The listeners
+     do NOT touch the DOM — they're safe to run before <body> exists.
+  2. inject_overlay(page): page.evaluate that creates the cursor
+     overlay <div>, a click-ripple element, and a keyboard HUD
+     element. Wires the elements to the state via callbacks:
+        state.onCursorMove = (x,y) => { cursor.style.transform = ... }
+        state.onMouseDown   = (x,y) => { cursor click ripple }
+        state.onKeyDown     = (label) => { show key chip }
+  3. remove_overlay(page): tear down DOM + clear state callbacks.
 
-The arrow SVG is a standard 14×20px mouse pointer (white outline +
-black fill), large enough to be visible at 100% but not so large it
-covers the element being clicked.
+Pattern source: snomiao/demowright (MIT) — uses the same
+addInitScript + callback-wired DOM injector split. We credit
+demowright in SKILL.md because the architectural pattern is
+their original work.
 
-Concurrency note: all functions are async (page.evaluate is async).
-They never block the event loop more than a few ms; the overlay's
-position is updated via direct DOM property writes, not React/Vue
-state, so it doesn't trigger app re-renders.
+Differences from demowright:
+  - We use left/top (CSS pixel) not transform translate, because
+    the recorder's click handler reads `window.__lastMouseX/Y`
+    (already in client coords) and we want minimal JS — the
+    pointer-events: none overlay can use either.
+  - We don't support auto-slowdown, TTS, SRT — those are
+    out of scope for the user-manual skill (the skill has its
+    own TTS via edge-tts, see mux_audio.py).
+  - We DO add keystroke badges because the user asked for
+    smoother comprehension — seeing the keys being typed
+    reinforces what the user should type.
+
+Failure modes are non-fatal: install/inject exceptions are
+swallowed and the recorder continues. The video records
+without HUD instead of crashing the run.
 """
 from __future__ import annotations
 import logging
@@ -38,185 +49,294 @@ from playwright.async_api import Page
 logger = logging.getLogger(__name__)
 
 
+# State key — the listener stores cursor pos + key presses here.
+HUD_STATE_KEY = "__recHud"
+# Overlay element ids (used for cleanup + debugging).
 CURSOR_ID = "__rec_cursor__"
-CURSOR_TRAIL_KEY = "__recCursorTrail"
-CURSOR_X_KEY = "__lastMouseX"
-CURSOR_Y_KEY = "__lastMouseY"
-
-# Standard mouse-pointer SVG. White outline + black fill so it's
-# visible on both light and dark backgrounds. Sized 14x20 to match
-# what the OS cursor looks like at 100% DPI.
-CURSOR_SVG = (
-    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="20" '
-    'viewBox="0 0 14 20" fill="none">'
-    '<path d="M0 0 L0 16 L4 12 L6.5 18 L9 17 L6.5 11 L11 11 Z" '
-    'fill="black" stroke="white" stroke-width="1" stroke-linejoin="round"/>'
-    '</svg>'
-)
+KEYS_ID = "__rec_keys__"
+RIPPLE_HOST_ID = "__rec_ripples__"
+HOST_ID = "__rec_hud_host__"
 
 
-_INJECT_JS = f"""
-() => {{
-  // Remove any pre-existing overlay (idempotent re-injection).
-  const existing = document.getElementById({CURSOR_ID!r});
-  if (existing) existing.remove();
+# --- The listener script (registered via addInitScript) --------------------
+#
+# Runs in EVERY new document/frame, before <body> exists. Just records
+# the latest cursor position + recent key presses; does NOT touch the DOM.
+# The DOM injector (page.evaluate) wires these state values to visible
+# elements by setting the onXxx callbacks.
+# Playwright's add_init_script wraps the script in an IIFE
+# automatically — we pass PLAIN STATEMENTS here, not a function
+# expression. (If we wrap in `() => { ... }`, add_init_script
+# double-wraps and the inner arrow function never runs.)
+LISTENER_JS = r"""
+if (window.__recHudInstalled) {} else {
+  window.__recHudInstalled = true;
+  var __recModifierKeys = new Set(['Shift', 'Control', 'Alt', 'Meta', 'CapsLock']);
+  var __recState = (window.__recHud = window.__recHud || {
+    cx: -40, cy: -40,
+    keys: [],
+    onCursorMove: null,
+    onMouseDown: null,
+    onMouseUp: null,
+    onKeyDown: null,
+  });
+  function __recFormatKey(e) {
+    if (__recModifierKeys.has(e.key)) return e.key;
+    var parts = [];
+    if (e.ctrlKey) parts.push('Ctrl');
+    if (e.altKey) parts.push('Alt');
+    if (e.shiftKey) parts.push('Shift');
+    if (e.metaKey) parts.push('Meta');
+    var k = e.key;
+    if (k === ' ') k = 'Space';
+    parts.push(k);
+    return parts.join('+');
+  }
+  document.addEventListener('mousemove', function(e) {
+    __recState.cx = e.clientX;
+    __recState.cy = e.clientY;
+    if (__recState.onCursorMove) __recState.onCursorMove(e.clientX, e.clientY);
+  }, true);
+  document.addEventListener('mousedown', function(e) {
+    if (__recState.onMouseDown) __recState.onMouseDown(e.clientX, e.clientY);
+  }, true);
+  document.addEventListener('mouseup', function() {
+    if (__recState.onMouseUp) __recState.onMouseUp();
+  }, true);
+  document.addEventListener('keydown', function(e) {
+    var label = __recFormatKey(e);
+    if (__recModifierKeys.has(e.key)) return;
+    __recState.keys.push({label, t: performance.now()});
+    if (__recState.keys.length > 20) __recState.keys.shift();
+    if (__recState.onKeyDown) __recState.onKeyDown(label);
+  }, true);
+}
+"""
 
-  const div = document.createElement('div');
-  div.id = {CURSOR_ID!r};
-  div.style.cssText = [
+
+# --- The DOM injector (called via page.evaluate) ---------------------------
+#
+# Creates the visible HUD elements and wires them to state callbacks.
+# Idempotent: skips if host element already exists.
+INJECTOR_JS = r"""
+() => {
+  if (document.getElementById('__rec_hud_host__')) return false;
+  const state = window.__recHud;
+  if (!state) return false;
+  const KEY_FADE_MS = 1500;
+
+  // Host container — high z-index, pointer-events:none so we
+  // never block real interactions. Everything HUD-related lives
+  // under this single root so cleanup is one removeChild.
+  const host = document.createElement('div');
+  host.id = '__rec_hud_host__';
+  host.style.cssText = [
     'position: fixed',
-    'left: 50%',
-    'top: 50%',
-    'width: 14px',
-    'height: 20px',
+    'top: 0', 'left: 0',
+    'width: 0', 'height: 0',
+    'z-index: 2147483647',
     'pointer-events: none',
-    'z-index: 2147483647',  // max int — overlay every app element
-    'transform: translate(-1px, -1px)',
-    'transition: none',     // no smoothing — direct mouse tracking
-    'will-change: transform',
   ].join('; ');
-  div.innerHTML = {CURSOR_SVG!r};
-  document.body.appendChild(div);
+  document.body.appendChild(host);
 
-  // Initialize trail buffer; recorder's click handler reads it.
-  if (!window.{CURSOR_TRAIL_KEY}) {{
-    window.{CURSOR_TRAIL_KEY} = [];
-  }}
+  // Style sheet — drop-shadow on the cursor, fade-out keyframes for
+  // keystrokes, scale animation for click ripples.
+  const style = document.createElement('style');
+  style.textContent = `
+    #__rec_cursor__ {
+      position: fixed; top: 0; left: 0;
+      width: 14px; height: 20px;
+      pointer-events: none;
+      transform: translate(-40px, -40px);
+      will-change: transform;
+      filter: drop-shadow(1px 1px 1px rgba(0,0,0,0.4));
+    }
+    #__rec_cursor__.clicking {
+      transform: translate(var(--rec-cursor-x), var(--rec-cursor-y)) scale(0.85);
+    }
+    .__rec_ripple__ {
+      position: fixed; width: 18px; height: 18px;
+      margin-left: -9px; margin-top: -9px;
+      border-radius: 50%;
+      border: 2px solid rgba(255, 80, 80, 0.85);
+      pointer-events: none;
+      animation: __rec_ripple_anim__ 0.5s ease-out forwards;
+    }
+    @keyframes __rec_ripple_anim__ {
+      0%   { transform: scale(0.4); opacity: 1; }
+      100% { transform: scale(3.5); opacity: 0; }
+    }
+    #__rec_keys__ {
+      position: fixed; bottom: 18px; left: 50%;
+      transform: translateX(-50%);
+      display: flex; gap: 6px; flex-wrap: wrap;
+      justify-content: center; max-width: 80vw;
+      pointer-events: none;
+    }
+    .__rec_key__ {
+      background: rgba(0,0,0,0.78);
+      color: #fff;
+      font: 13px/1 ui-monospace, "SF Mono", Menlo, monospace;
+      padding: 5px 9px;
+      border-radius: 5px;
+      border: 1px solid rgba(255,255,255,0.25);
+      box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+      animation: __rec_key_fade__ 1.5s ease-out forwards;
+    }
+    @keyframes __rec_key_fade__ {
+      0%   { opacity: 1; transform: translateY(0); }
+      70%  { opacity: 1; transform: translateY(0); }
+      100% { opacity: 0; transform: translateY(-10px); }
+    }
+  `;
+  host.appendChild(style);
+
+  // --- Cursor overlay ---
+  const cursor = document.createElement('div');
+  cursor.id = '__rec_cursor__';
+  // Standard mouse pointer SVG, white outline + black fill so it
+  // shows on both light and dark backgrounds.
+  cursor.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="20" viewBox="0 0 14 20" fill="none">'
+    + '<path d="M0 0 L0 16 L4 12 L6.5 18 L9 17 L6.5 11 L11 11 Z" fill="black" stroke="white" stroke-width="1" stroke-linejoin="round"/>'
+    + '</svg>';
+  host.appendChild(cursor);
+
+  // --- Click ripple host ---
+  const rippleHost = document.createElement('div');
+  rippleHost.id = '__rec_ripples__';
+  host.appendChild(rippleHost);
+
+  // --- Keystroke HUD ---
+  const keys = document.createElement('div');
+  keys.id = '__rec_keys__';
+  host.appendChild(keys);
+
+  // Wire state callbacks. Each callback is a closure that captures
+  // the elements above. Setting onXxx = null on teardown will
+  // stop the listener from invoking them.
+  function setCursorPos(x, y) {
+    cursor.style.setProperty('--rec-cursor-x', x + 'px');
+    cursor.style.setProperty('--rec-cursor-y', y + 'px');
+    // For the non-clicking state we still need to update the
+    // base transform. We do it via a direct style assignment so
+    // the CSS variable trick above only applies during .clicking.
+    cursor.style.transform = 'translate(' + x + 'px,' + y + 'px)';
+  }
+  setCursorPos(state.cx, state.cy);
+
+  state.onCursorMove = (x, y) => { setCursorPos(x, y); };
+
+  state.onMouseDown = (x, y) => {
+    cursor.classList.add('clicking');
+    const r = document.createElement('div');
+    r.className = '__rec_ripple__';
+    r.style.left = x + 'px';
+    r.style.top = y + 'px';
+    rippleHost.appendChild(r);
+    // Auto-clean ripple after animation.
+    setTimeout(() => r.remove(), 600);
+  };
+  state.onMouseUp = () => { cursor.classList.remove('clicking'); };
+
+  state.onKeyDown = (label) => {
+    const chip = document.createElement('span');
+    chip.className = '__rec_key__';
+    chip.textContent = label;
+    keys.appendChild(chip);
+    // Fade out via the CSS animation; remove from DOM after it ends
+    // so we don't leak elements.
+    setTimeout(() => chip.remove(), KEY_FADE_MS + 100);
+  };
+
   return true;
-}}
+}
 """
 
 
-_REMOVE_JS = f"""
-() => {{
-  const el = document.getElementById({CURSOR_ID!r});
-  if (el) el.remove();
+# --- The teardown script ---------------------------------------------------
+REMOVE_JS = r"""
+() => {
+  const host = document.getElementById('__rec_hud_host__');
+  if (host) host.remove();
+  // Clear callbacks so a later inject gets a clean state.
+  const state = window.__recHud;
+  if (state) {
+    state.onCursorMove = null;
+    state.onMouseDown = null;
+    state.onMouseUp = null;
+    state.onKeyDown = null;
+  }
   return true;
-}}
+}
 """
 
 
-_MOVE_JS = f"""
-({{x, y}}) => {{
-  // Playwright's page.evaluate() takes a single argument. We
-  // destructure {{x, y}} so callers can pass a plain dict.
-  const el = document.getElementById({CURSOR_ID!r});
-  if (!el) return false;
-  el.style.left = x + 'px';
-  el.style.top = y + 'px';
-  window.{CURSOR_X_KEY} = x;
-  window.{CURSOR_Y_KEY} = y;
-  window.{CURSOR_TRAIL_KEY} = window.{CURSOR_TRAIL_KEY} || [];
-  window.{CURSOR_TRAIL_KEY}.push({{x, y, t: performance.now()}});
-  return true;
-}}
-"""
+async def install(page: Page) -> None:
+    """Register the mousemove/mousedown/keydown listener via addInitScript.
 
-
-_START_TRACK_JS = f"""
-() => {{
-  // Record ALL mouse moves on the page. Playwright dispatches its
-  // page.mouse.move() as real DOM mousemove events, so this listener
-  // captures them without us having to wrap every move call.
-  if (window.__recCursorTrackInstalled) return false;
-  window.__recCursorTrackInstalled = true;
-  const handler = (ev) => {{
-    const x = ev.clientX, y = ev.clientY;
-    window.{CURSOR_X_KEY} = x;
-    window.{CURSOR_Y_KEY} = y;
-    (window.{CURSOR_TRAIL_KEY} = window.{CURSOR_TRAIL_KEY} || []).push(
-      {{x, y, t: performance.now()}}
-    );
-  }};
-  // Capture phase so we get moves even on elements that stop propagation.
-  document.addEventListener('mousemove', handler, true);
-  window.__recCursorTrackHandler = handler;
-  return true;
-}}
-"""
-
-
-_STOP_TRACK_JS = f"""
-() => {{
-  if (!window.__recCursorTrackInstalled) return false;
-  const h = window.__recCursorTrackHandler;
-  if (h) document.removeEventListener('mousemove', h, true);
-  window.__recCursorTrackInstalled = false;
-  return true;
-}}
-"""
-
-
-async def inject_cursor(page: Page) -> None:
-    """Append the cursor overlay <div> to the page body.
-
-    Idempotent: re-injecting removes the old overlay first.
-    Safe to call before the page is fully loaded — the overlay
-    lives in <body>, so if <body> doesn't exist yet, the call
-    just no-ops (the overlay will be injected on the next navigate).
+    Safe to call BEFORE any navigation — the listener will be active
+    in every new document from the moment addInitScript registers it.
+    Idempotent: addInitScript + the script's own __recHudInstalled
+    guard make repeat calls no-ops.
     """
     try:
-        await page.evaluate(_INJECT_JS)
+        await page.add_init_script(LISTENER_JS)
     except Exception as e:
-        # Don't crash the whole recording just because cursor failed.
-        # Logged at warning level so the agent can see why some
-        # videos don't have a cursor.
-        logger.warning("inject_cursor failed: %s", e)
+        logger.warning("install (addInitScript) failed: %s", e)
+
+
+async def inject_overlay(page: Page) -> None:
+    """Create the HUD DOM elements (cursor, click ripple host, key HUD)
+    and wire them to the listener's state callbacks.
+
+    Must be called AFTER at least one navigation has happened (so
+    document.body exists). Idempotent: re-injecting is a no-op.
+    """
+    try:
+        await page.evaluate(INJECTOR_JS)
+    except Exception as e:
+        # Don't crash recording on HUD failure — just log.
+        logger.warning("inject_overlay failed: %s", e)
+
+
+async def remove_overlay(page: Page) -> None:
+    """Tear down the HUD. Clears state callbacks too so a later
+    inject (e.g. next video_start) starts clean."""
+    try:
+        await page.evaluate(REMOVE_JS)
+    except Exception as e:
+        logger.warning("remove_overlay failed: %s", e)
+
+
+# Backwards-compat aliases — old v0.3.7 callers used these names.
+# New code should use inject_overlay / remove_overlay.
+async def inject_cursor(page: Page) -> None:
+    """Deprecated: use inject_overlay()."""
+    await inject_overlay(page)
 
 
 async def remove_cursor(page: Page) -> None:
-    """Remove the cursor overlay and stop tracking. Idempotent."""
-    try:
-        await page.evaluate(_REMOVE_JS)
-    except Exception as e:
-        logger.warning("remove_cursor failed: %s", e)
-
-
-async def move_cursor(page: Page, x: float, y: float) -> None:
-    """Update the cursor overlay's position.
-
-    Cheap: one DOM property write + push to a JS array. Safe to
-    call on every mousemove event without blocking the recorder.
-    """
-    try:
-        # Playwright's page.evaluate() takes exactly one arg, so
-        # we pass {x, y} as a dict and let the JS destructure.
-        await page.evaluate(_MOVE_JS, {"x": x, "y": y})
-    except Exception:
-        # If the page navigated or closed mid-call, swallow — the
-        # next call will re-anchor.
-        pass
+    """Deprecated: use remove_overlay()."""
+    await remove_overlay(page)
 
 
 async def start_tracking(page: Page) -> None:
-    """Install a global mousemove listener that updates __lastMouseX/Y.
-
-    This is what lets the cursor follow the mouse even between
-    recorder-emitted actions (page.mouse.move in click handler).
-    Without it the cursor would only update on the explicit
-    move_cursor() calls and would not follow the trail.
-    """
-    try:
-        await page.evaluate(_START_TRACK_JS)
-    except Exception as e:
-        logger.warning("start_tracking failed: %s", e)
+    """Deprecated alias — in v0.3.8 tracking is started by install()
+    via addInitScript. This function is a no-op kept for API compat."""
+    return
 
 
 async def stop_tracking(page: Page) -> None:
-    """Remove the mousemove listener. Idempotent."""
-    try:
-        await page.evaluate(_STOP_TRACK_JS)
-    except Exception as e:
-        logger.warning("stop_tracking failed: %s", e)
+    """Deprecated alias — see start_tracking."""
+    return
 
 
 async def get_trail(page: Page) -> list[dict[str, Any]]:
-    """Read the recorded mouse trail (list of {x, y, t} dicts).
-
-    Used by debug tooling; the recorder doesn't read it back. Useful
-    for unit tests that want to verify the listener fires.
-    """
+    """No-op kept for API compat. The listener still records
+    positions into state.cx/cy but we don't expose the full
+    trail (was unused by the recorder)."""
     try:
-        return await page.evaluate(f"() => window.{CURSOR_TRAIL_KEY} || []")
+        state = await page.evaluate("() => ({x: window.__recHud?.cx, y: window.__recHud?.cy})")
+        return [state] if state and state.get("x") is not None else []
     except Exception:
         return []

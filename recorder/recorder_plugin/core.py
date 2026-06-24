@@ -99,7 +99,27 @@ class Recorder:
                 "width": self.viewport["width"],
                 "height": self.viewport["height"],
             }
+        # v0.3.8 fix: register the cursor/HUD listener as a context-level
+        # addInitScript BEFORE creating any page. The listener then runs in
+        # every new document from the very first navigation, including the
+        # navigate-to-app step that happens BEFORE video_start. If we
+        # registered it on the page AFTER navigate (the v0.3.7 mistake),
+        # it would only fire on the NEXT navigation, which never happens
+        # in a single video segment — so the cursor overlay would never
+        # track the user's interactions.
+        from recorder_plugin.cursor import LISTENER_JS
         self._context = await self._browser.new_context(**context_kwargs)
+        try:
+            await self._context.add_init_script(LISTENER_JS)
+        except Exception as e:
+            # Don't crash recording on cursor failure — just log and
+            # continue without a cursor overlay.
+            import sys
+            print(
+                f"WARNING: cursor listener registration failed "
+                f"({type(e).__name__}: {e}); video will not show cursor.",
+                file=sys.stderr,
+            )
         self._page = await self._context.new_page()
 
     async def close(self) -> None:

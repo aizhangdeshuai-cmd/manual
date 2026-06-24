@@ -1,5 +1,80 @@
 # Changelog
 
+## 1.0.3 (2026-06-24) — recorder v0.3.8: cursor actually follows the mouse
+
+Followup to v1.0.2. The recorder's "visible cursor" feature
+(introduced as a side-effect of v1.0.2's `file://` fix chain,
+released as recorder v0.3.7) was actually broken: the cursor
+overlay appeared but stayed frozen at 50%/50% of the viewport.
+The user reported "鼠标箭头不动" — and was right.
+
+Recorder v0.3.8 fixes this by splitting the cursor subsystem
+into two pieces:
+
+- A **listener** registered via `context.add_init_script()`
+  BEFORE any page is created. It only updates a state object
+  on `window.__recHud` — never touches the DOM. Safe to run
+  before `<body>` exists.
+- A **DOM injector** that runs as `page.evaluate` after
+  navigation. It creates the cursor element and wires it to
+  the listener's state via a callback, so the cursor's
+  `transform: translate(x, y)` updates on every `mousemove`.
+
+The split is the key insight: addInitScript must run as plain
+statements (Playwright double-wraps its input), and a listener
+that touches the DOM before the body exists will silently fail.
+The split also fixes a regression that prevented the listener
+from registering at all on the *first* page navigation.
+
+v0.3.8 also adds a **keystroke HUD** (5-key trail at the
+bottom of the screen) and **click ripples** (200ms expanding
+ring at click point) so the user can follow the demo
+even when the password field is masked. Pattern adapted from
+[snomiao/demowright](https://github.com/snomiao/demowright)
+(MIT, 2026) — see `recorder/CHANGELOG.md` for full credits.
+
+**What changed in the skill itself**: zero. This is a
+recorder-only fix; no SKILL.md workflow or manual-helper
+changes. The only file that mentions v0.3.7 in the main
+SKILL.md is the "recorder gotchas" section, which still
+applies (v0.3.7 introduced the cursor concept; v0.3.8 makes
+it actually work).
+
+**Upgrade note**: clear `.recorder_state.json` + the
+`_video_buffer/` + the per-flow `sys/<flow>/` directories
+after pulling v0.3.8, otherwise `is_video_session_valid()`
+will reuse the v0.3.7 (broken-cursor) mp4s. See
+`recorder/CHANGELOG.md` for the exact commands.
+
+### What changed
+
+- `recorder/recorder_plugin/cursor.py` — rewritten (342 lines)
+  with the addInitScript + DOM-injector split.
+- `recorder/recorder_plugin/script.py` — `video_start`
+  simplified to just `inject_overlay` (install is now
+  context-level).
+- `recorder/recorder_plugin/core.py` — `Recorder.start()`
+  calls `self._context.add_init_script(LISTENER_JS)` BEFORE
+  `new_context` returns.
+- `recorder/tests/unit/test_cursor.py` — 11 tests, includes
+  the regression test for the addInitScript-as-plain-statements
+  gotcha.
+
+### Manual probes (test-app)
+
+- Before: cursor at (50%, 50%) frozen, no click ripples, no
+  keystroke badges.
+- After: cursor follows real mouse, ripple at click point,
+  keystroke chips at bottom (last 5 keys, 1.5s fade).
+
+### Versions
+
+- Skill: 1.0.2 → 1.0.3.
+- Recorder: 0.3.7 → 0.3.8.
+- Recorder unit tests: 158 → 168.
+
+# Changelog
+
 Top-level changelog for the user-manual skill. The recorder opt-in
 plugin (`recorder/`) has its own changelog at `recorder/CHANGELOG.md` —
 versioned in lockstep with the main skill.

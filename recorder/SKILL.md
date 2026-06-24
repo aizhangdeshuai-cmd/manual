@@ -120,6 +120,78 @@ python3 -m recorder_plugin.cli concat-narration nar1.mp3 nar2.mp3 --out full.mp3
 python3 -m recorder_plugin.cli mux-audio recording.webm full.mp3 --out with-voice.mp4
 ```
 
+#### v0.3.8 — Cursor actually follows the mouse + keystroke HUD + click ripples
+
+v0.3.7 introduced a visible cursor overlay but the cursor was
+**frozen at the inject position** (50%/50% of the viewport).
+The recorded webm showed a static arrow while the user typed
+around it — even more "demo-ish" than no cursor. Plus a
+second bug: the `mousemove` listener was registered with
+`page.add_init_script()` AFTER the page had navigated, so
+on the *first* page load the listener never ran at all.
+
+This release fixes both bugs by splitting the cursor subsystem
+into two pieces, following the
+[snomiao/demowright](https://github.com/snomiao/demowright)
+pattern (MIT, 2026):
+
+- **Listener** (registered with `context.add_init_script()`
+  in `Recorder.start()` BEFORE any page is created). The
+  listener runs on every navigation, attaches
+  `mousemove`/`mousedown`/`mouseup`/`keydown` handlers, and
+  updates a state object on `window.__recHud`. **It does
+  not touch the DOM** — safe to run before `<body>` exists.
+- **DOM injector** (called from `video_start` via
+  `page.evaluate` after the page is loaded). Creates the
+  visible cursor, click-ripple host, and keystroke HUD
+  elements, and wires them to the state via callback
+  functions: `state.onCursorMove`, `state.onMouseDown`,
+  `state.onKeyDown`.
+
+The split fixes the v0.3.7 frozen-cursor bug because the
+cursor's `transform: translate(x, y)` is set by the DOM
+injector's callback, not by the listener — so every
+`mousemove` *visually* moves the cursor with no race
+against DOM readiness.
+
+**Critical gotcha worth knowing** (covered by
+`test_listener_uses_addinit_compatible_pattern`):
+
+`page.add_init_script()` double-wraps its input. If you
+pass an arrow function, the runtime sees
+`(() => { () => { ... } })()` and the inner arrow never
+runs. The listener MUST be plain statements:
+
+```python
+# WRONG — listener never registers
+await page.add_init_script("() => { window.addEventListener(...) }")
+
+# RIGHT — listener registers on every navigation
+await page.add_init_script("window.addEventListener(...)")
+```
+
+This is why the listener lives in a module-level
+`LISTENER_JS` constant in `cursor.py` and is asserted by
+a dedicated test.
+
+**New in this release**:
+
+- **Click ripple** — a brief expanding ring at the click
+  position, ~200ms. Reinforces "the click happened here".
+- **Keystroke HUD** — a row of key chips at the bottom of
+  the screen, one per `keydown`, last 5 keys, 1.5s fade.
+  Lets the user follow password-typing instructions even
+  when the password is masked to dots.
+- **Context-level install** — `Recorder.start()` calls
+  `self._context.add_init_script(LISTENER_JS)` BEFORE
+  `new_page`. Listener is active from the first navigation.
+
+**Upgrade note**: clear `.recorder_state.json` + the
+`_video_buffer/` + the per-flow `sys/<flow>/` directories
+after pulling v0.3.8, otherwise `is_video_session_valid()`
+will reuse the v0.3.7 (broken-cursor) mp4s. See
+`CHANGELOG.md` for the exact commands.
+
 #### v0.3.7 — Visible cursor in recorded video (in-page SVG overlay)
 
 Playwright's `recordVideo` captures the page DOM but **not** the OS

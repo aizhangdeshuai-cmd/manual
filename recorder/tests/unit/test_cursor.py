@@ -1,22 +1,19 @@
-"""v0.3.7: cursor overlay injection for visible mouse cursor in recorded video.
+"""v0.3.8: HUD overlay (cursor + keystroke + click ripple) for recorded video.
 
-Playwright's recordVideo captures the page DOM but NOT the OS cursor.
-In headless mode there's no OS cursor to render, so the recorded
-webm shows clicks happening with no visible pointer. This module
-injects an in-page SVG cursor that follows the mouse so the
-recorded video looks like a real person using the app.
+The recorder injects a visible HUD into the recorded page so the
+webm shows a real-looking cursor that follows the mouse, click
+ripples at the moment of mousedown, and keystroke chips when
+keys are pressed. This makes the recording look like a real
+person using the app, not a slide-show.
 
-These tests verify:
-  - inject_cursor adds a <div id="__rec_cursor__"> with the expected
-    SVG arrow inside.
-  - remove_cursor takes it back out (idempotent).
-  - move_cursor updates the overlay's left/top CSS.
-  - start_tracking installs a mousemove listener; subsequent DOM
-    mousemove events update window.__lastMouseX/__lastMouseY and
-    push to __recCursorTrail.
-  - stop_tracking removes the listener.
-  - inject is idempotent: a second call replaces the old overlay
-    cleanly without leaving duplicates.
+The pattern is from snomiao/demowright (MIT, 2026) — split into
+two pieces:
+  - A listener (addInitScript) that runs in every new document,
+    updates state.cx/cy / state.keys but never touches the DOM.
+  - A DOM injector (page.evaluate) that creates the visible
+    elements and wires them to the listener via callbacks.
+
+These tests verify both pieces and the integration.
 
 Tests use a minimal synthetic HTML page written to a temp file
 and loaded via file:// — no dev server needed.
@@ -82,9 +79,9 @@ SYNTHETIC_HTML = """
 
 
 @unittest.skipIf(_needs_browser(), _needs_browser() or "")
-class TestCursorOverlay(unittest.IsolatedAsyncioTestCase):
+class TestHudOverlay(unittest.IsolatedAsyncioTestCase):
     """End-to-end: launch Chromium headless against a real page,
-    inject the cursor, manipulate it, verify the DOM state."""
+    install + inject the HUD, manipulate it, verify DOM state."""
 
     async def asyncSetUp(self) -> None:
         # Write the synthetic page to a temp file
@@ -100,11 +97,18 @@ class TestCursorOverlay(unittest.IsolatedAsyncioTestCase):
         self._ctx = await self._browser.new_context(
             viewport={"width": 800, "height": 600},
         )
+        # v0.3.8: install() registers an addInitScript that runs
+        # in every new document. Must be called BEFORE goto() so
+        # the listener is already active when the page loads.
+        await cursor_mod.install(self._ctx)
         self._page = await self._ctx.new_page()
         await self._page.goto(self._tmp_path.as_uri())
+        # After navigation, inject the visible DOM elements.
+        await cursor_mod.inject_overlay(self._page)
 
     async def asyncTearDown(self) -> None:
         try:
+            await cursor_mod.remove_overlay(self._page)
             await self._ctx.close()
             await self._browser.close()
             await self._pw.stop()
@@ -115,145 +119,153 @@ class TestCursorOverlay(unittest.IsolatedAsyncioTestCase):
         except Exception:
             pass
 
-    async def test_inject_adds_overlay_with_svg(self) -> None:
-        """After inject_cursor, body should contain a #__rec_cursor__
-        div with an <svg> child. The overlay should be fixed-position
-        and have pointer-events:none so it never blocks clicks."""
-        await cursor_mod.inject_cursor(self._page)
+    async def test_inject_creates_cursor_with_svg(self) -> None:
+        """After inject_overlay, the HUD host should exist and
+        contain the cursor <div> with an <svg> child."""
         info = await self._page.evaluate("""
             () => {
-                const el = document.getElementById('__rec_cursor__');
-                if (!el) return { found: false };
+                const host = document.getElementById('__rec_hud_host__');
+                const cursor = document.getElementById('__rec_cursor__');
+                if (!host || !cursor) return { found: false };
                 return {
                     found: true,
-                    tag: el.tagName,
-                    hasSvg: !!el.querySelector('svg'),
-                    position: getComputedStyle(el).position,
-                    pointerEvents: getComputedStyle(el).pointerEvents,
-                    zIndex: parseInt(getComputedStyle(el).zIndex, 10),
+                    hostPointerEvents: getComputedStyle(host).pointerEvents,
+                    cursorHasSvg: !!cursor.querySelector('svg'),
+                    hostZIndex: parseInt(getComputedStyle(host).zIndex, 10),
                 };
             }
         """)
-        self.assertTrue(info["found"], "overlay <div> missing")
-        self.assertEqual(info["tag"], "DIV")
-        self.assertTrue(info["hasSvg"], "overlay <div> has no <svg> child")
-        self.assertEqual(info["position"], "fixed")
-        self.assertEqual(info["pointerEvents"], "none")
+        self.assertTrue(info["found"], "HUD host or cursor missing")
+        self.assertEqual(info["hostPointerEvents"], "none")
+        self.assertTrue(info["cursorHasSvg"], "cursor <div> has no <svg> child")
         # z-index 2147483647 is max-int; should be the largest possible
-        self.assertGreaterEqual(info["zIndex"], 2147483646)
+        self.assertGreaterEqual(info["hostZIndex"], 2147483646)
+
+    async def test_cursor_tracks_mousemove(self) -> None:
+        """v0.3.7 bug regression: the cursor overlay's transform
+        must actually follow mouse moves. The listener's callback
+        updates cursor.style.transform; the cursor's transform
+        CSS variable should reflect the latest mouse position."""
+        # Initial position is the state's cx/cy (defaults to -40,-40)
+        await self._page.evaluate("""
+            () => {
+                const c = document.getElementById('__rec_cursor__');
+                window.__t0 = c.style.transform;
+            }
+        """)
+        # Dispatch a mousemove
+        await self._page.evaluate("""
+            () => document.dispatchEvent(new MouseEvent('mousemove',
+                { clientX: 200, clientY: 300, bubbles: true }))
+        """)
+        await self._page.wait_for_timeout(50)
+        new_xform = await self._page.evaluate("""
+            () => document.getElementById('__rec_cursor__').style.transform
+        """)
+        # The transform should now contain 200, 300 somewhere
+        self.assertIn("200", new_xform, f"transform did not update: {new_xform!r}")
+        self.assertIn("300", new_xform, f"transform did not update: {new_xform!r}")
 
     async def test_inject_is_idempotent(self) -> None:
-        """Calling inject_cursor twice should leave exactly ONE
-        overlay element (not two stacked on top of each other)."""
-        await cursor_mod.inject_cursor(self._page)
-        await cursor_mod.inject_cursor(self._page)
+        """Re-injecting the overlay should leave exactly ONE host element."""
+        await cursor_mod.inject_overlay(self._page)
         count = await self._page.evaluate("""
-            () => document.querySelectorAll('#__rec_cursor__').length
+            () => document.querySelectorAll('#__rec_hud_host__').length
         """)
-        self.assertEqual(count, 1, "duplicate overlays after re-inject")
+        self.assertEqual(count, 1, "duplicate HUD hosts after re-inject")
 
-    async def test_remove_clears_overlay(self) -> None:
-        """remove_cursor should remove the overlay; calling it
-        twice is a no-op (idempotent)."""
-        await cursor_mod.inject_cursor(self._page)
-        await cursor_mod.remove_cursor(self._page)
+    async def test_remove_clears_host_and_callbacks(self) -> None:
+        """remove_overlay removes the host AND nulls the state
+        callbacks, so a later inject gets a clean slate."""
+        await cursor_mod.remove_overlay(self._page)
         gone = await self._page.evaluate("""
-            () => !document.getElementById('__rec_cursor__')
+            () => !document.getElementById('__rec_hud_host__')
         """)
-        self.assertTrue(gone, "overlay still present after remove")
-        # Idempotent: removing again should not throw.
-        await cursor_mod.remove_cursor(self._page)
-
-    async def test_move_cursor_updates_position(self) -> None:
-        """move_cursor(x, y) should set the overlay's left/top CSS
-        and update window.__lastMouseX/Y."""
-        await cursor_mod.inject_cursor(self._page)
-        await cursor_mod.move_cursor(self._page, 123.4, 567.8)
-        pos = await self._page.evaluate("""
+        self.assertTrue(gone, "HUD host still present after remove")
+        callbacks_cleared = await self._page.evaluate("""
             () => {
-                const el = document.getElementById('__rec_cursor__');
+                const s = window.__recHud;
+                return !s.onCursorMove && !s.onMouseDown && !s.onKeyDown;
+            }
+        """)
+        self.assertTrue(callbacks_cleared, "state callbacks not cleared")
+        # Re-inject should succeed cleanly.
+        await cursor_mod.inject_overlay(self._page)
+        again = await self._page.evaluate("""
+            () => !!document.getElementById('__rec_hud_host__')
+        """)
+        self.assertTrue(again, "could not re-inject after remove")
+
+    async def test_mousedown_creates_click_ripple(self) -> None:
+        """A mousedown event should create a ripple element at
+        the click coordinates."""
+        await self._page.evaluate("""
+            () => document.dispatchEvent(new MouseEvent('mousedown',
+                { clientX: 150, clientY: 250, bubbles: true }))
+        """)
+        await self._page.wait_for_timeout(50)
+        info = await self._page.evaluate("""
+            () => {
+                const r = document.querySelector('.__rec_ripple__');
+                if (!r) return { found: false };
                 return {
-                    left: el.style.left,
-                    top: el.style.top,
-                    x: window.__lastMouseX,
-                    y: window.__lastMouseY,
+                    found: true,
+                    left: r.style.left,
+                    top: r.style.top,
                 };
             }
         """)
-        self.assertEqual(pos["left"], "123.4px")
-        self.assertEqual(pos["top"], "567.8px")
-        self.assertEqual(pos["x"], 123.4)
-        self.assertEqual(pos["y"], 567.8)
+        self.assertTrue(info["found"], "no ripple element after mousedown")
+        self.assertEqual(info["left"], "150px")
+        self.assertEqual(info["top"], "250px")
 
-    async def test_start_tracking_captures_mousemove(self) -> None:
-        """After start_tracking, dispatching a DOM mousemove event
-        should update __lastMouseX/Y and append to the trail."""
-        await cursor_mod.inject_cursor(self._page)
-        await cursor_mod.start_tracking(self._page)
-        # Dispatch a real DOM event
+    async def test_keydown_creates_keystroke_chip(self) -> None:
+        """A keydown event should add a chip to the keystroke HUD."""
         await self._page.evaluate("""
+            () => document.dispatchEvent(new KeyboardEvent('keydown',
+                { key: 'a', bubbles: true }))
+        """)
+        await self._page.wait_for_timeout(50)
+        chip = await self._page.evaluate("""
             () => {
-                const ev = new MouseEvent('mousemove', {
-                    clientX: 50, clientY: 75, bubbles: true,
-                });
-                document.dispatchEvent(ev);
+                const chips = document.querySelectorAll('.__rec_key__');
+                return chips.length > 0 ? chips[0].textContent : null;
             }
         """)
-        result = await self._page.evaluate("""
-            () => ({
-                x: window.__lastMouseX,
-                y: window.__lastMouseY,
-                trailLen: (window.__recCursorTrail || []).length,
-            })
-        """)
-        self.assertEqual(result["x"], 50)
-        self.assertEqual(result["y"], 75)
-        self.assertGreaterEqual(result["trailLen"], 1)
+        self.assertEqual(chip, "a", f"expected keystroke chip 'a', got {chip!r}")
 
-    async def test_stop_tracking_detaches_listener(self) -> None:
-        """After stop_tracking, dispatched mousemove events should
-        NOT update __lastMouseX/Y (until tracking is re-started)."""
-        await cursor_mod.inject_cursor(self._page)
-        await cursor_mod.start_tracking(self._page)
-        # Send one event — captured
-        await self._page.evaluate("""
-            () => document.dispatchEvent(new MouseEvent('mousemove',
-                { clientX: 10, clientY: 20, bubbles: true }))
-        """)
-        await cursor_mod.stop_tracking(self._page)
-        # Reset state
-        await self._page.evaluate(
-            "() => { window.__lastMouseX = -1; window.__lastMouseY = -1; }"
-        )
-        # Send another — should NOT be captured
-        await self._page.evaluate("""
-            () => document.dispatchEvent(new MouseEvent('mousemove',
-                { clientX: 999, clientY: 888, bubbles: true }))
-        """)
-        pos = await self._page.evaluate("""
-            () => ({ x: window.__lastMouseX, y: window.__lastMouseY })
-        """)
-        self.assertEqual(pos["x"], -1)
-        self.assertEqual(pos["y"], -1)
-
-    async def test_overlay_does_not_block_clicks(self) -> None:
-        """The overlay must have pointer-events:none so clicks
-        pass through to the elements underneath. We verify by
-        clicking a known button and checking the click reached it."""
-        await cursor_mod.inject_cursor(self._page)
-        # Move cursor over the button, then click. If the overlay
-        # blocked the click, the button's click event would not
-        # fire and our flag would remain false.
+    async def test_hud_does_not_block_clicks(self) -> None:
+        """The HUD host must have pointer-events:none so clicks
+        pass through to the elements underneath. Verify by
+        clicking the test button and checking the click reached it."""
         await self._page.evaluate("""
             () => { window.__btnClicked = false;
                     document.getElementById('test-btn').addEventListener(
                         'click', () => { window.__btnClicked = true; }
                     ); }
         """)
-        await cursor_mod.move_cursor(self._page, 250, 225)
         await self._page.mouse.click(250, 225)
         clicked = await self._page.evaluate("() => window.__btnClicked")
-        self.assertTrue(clicked, "button click was blocked by cursor overlay")
+        self.assertTrue(clicked, "button click was blocked by HUD overlay")
+
+    async def test_install_survives_navigation(self) -> None:
+        """v0.3.7 missed this: addInitScript runs on every
+        navigation, so a page.goto() after install() should still
+        leave the listener active. This is the whole point of using
+        addInitScript instead of page.evaluate."""
+        # Navigate to a different page (same file but reload)
+        await self._page.goto(self._tmp_path.as_uri())
+        # The listener should still be active; dispatch a mousemove
+        # and check state.cx/cy updated.
+        await self._page.evaluate("""
+            () => document.dispatchEvent(new MouseEvent('mousemove',
+                { clientX: 333, clientY: 444, bubbles: true }))
+        """)
+        state = await self._page.evaluate("""
+            () => ({ cx: window.__recHud.cx, cy: window.__recHud.cy })
+        """)
+        self.assertEqual(state["cx"], 333, "listener did not survive navigation")
+        self.assertEqual(state["cy"], 444, "listener did not survive navigation")
 
 
 class TestCursorModuleShape(unittest.TestCase):
@@ -261,30 +273,35 @@ class TestCursorModuleShape(unittest.TestCase):
 
     def test_module_exports_expected_functions(self) -> None:
         from recorder_plugin import cursor as c
-        for name in ("inject_cursor", "remove_cursor", "move_cursor",
-                     "start_tracking", "stop_tracking", "get_trail"):
+        for name in ("install", "inject_overlay", "remove_overlay",
+                     "inject_cursor", "remove_cursor", "start_tracking",
+                     "stop_tracking", "get_trail"):
+            fn = getattr(c, name, None)
+            self.assertIsNotNone(fn, f"cursor.{name} is missing")
             self.assertTrue(
-                inspect.iscoroutinefunction(getattr(c, name)),
+                inspect.iscoroutinefunction(fn),
                 f"cursor.{name} should be a coroutine function",
             )
 
-    def test_inject_js_contains_cursor_id(self) -> None:
-        """The inject JS must reference the CURSOR_ID so the
-        appended <div> can be found again for cleanup."""
+    def test_listener_uses_addinit_compatible_pattern(self) -> None:
+        """The listener JS must be self-contained (a function that
+        runs immediately) and must NOT touch the DOM at script-
+        load time. This is what makes it safe to register via
+        addInitScript (which runs before <body> exists)."""
         from recorder_plugin import cursor as c
-        self.assertIn(c.CURSOR_ID, c._INJECT_JS)
+        self.assertIn("__recHudInstalled", c.LISTENER_JS,
+                      "listener should guard against re-install")
+        self.assertNotIn("document.body", c.LISTENER_JS,
+                         "listener must not touch document.body")
 
-    def test_remove_js_is_safe_when_overlay_missing(self) -> None:
-        """The remove JS uses getElementById + remove(), which is
-        safe to call when no overlay exists. Verify the JS is
-        well-formed (parses as JS — checked by Node or just by
-        the fact that remove_child on null would throw, but
-        getElementById returning null is fine)."""
+    def test_injector_creates_known_element_ids(self) -> None:
+        """The injector JS must create the elements that the
+        SKILL.md and CHANGELOG describe."""
         from recorder_plugin import cursor as c
-        # The function is wrapped in an IIFE; just check it doesn't
-        # contain obvious bugs (e.g. unclosed braces).
-        self.assertTrue(c._REMOVE_JS.strip().startswith("() =>"))
-        self.assertIn("return", c._REMOVE_JS)
+        for expected_id in ("__rec_hud_host__", "__rec_cursor__",
+                            "__rec_keys__"):
+            self.assertIn(expected_id, c.INJECTOR_JS,
+                          f"injector missing {expected_id}")
 
 
 if __name__ == "__main__":

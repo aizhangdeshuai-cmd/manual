@@ -279,19 +279,21 @@ async def _handle_video_start(rec: Recorder, step: dict, name_to_path: dict) -> 
         "recording_url": recording_url,
         "base_url": rec._last_base_url,
     }
-    # v0.3.7: inject a visible cursor overlay so the recorded webm
-    # shows a mouse pointer tracking real interactions. Playwright's
-    # recordVideo captures the DOM, not the OS cursor, so without
-    # this overlay clicks look like they happen "out of nowhere".
-    # The overlay has pointer-events:none so it never blocks clicks.
+    # v0.3.8: inject the HUD (cursor + keystroke badges + click
+    # ripples) into the recorded page. The listener is registered
+    # earlier (in Recorder.start() via context.add_init_script) so
+    # it's already tracking mouse + keys from the very first
+    # navigation. All we need here is to create the visible DOM
+    # elements and wire them to the listener's state callbacks.
+    # Pattern: see demowright (snomiao/demowright, MIT) for the
+    # addInitScript + callback-wired DOM injector split.
     try:
-        from recorder_plugin.cursor import inject_cursor, start_tracking
-        await inject_cursor(rec.page)
-        await start_tracking(rec.page)
+        from recorder_plugin.cursor import inject_overlay
+        await inject_overlay(rec.page)
     except Exception as e:
         print(
-            f"WARNING: cursor overlay injection failed for video '{name}' "
-            f"({type(e).__name__}: {e}); video will not show cursor.",
+            f"WARNING: HUD overlay injection failed for video '{name}' "
+            f"({type(e).__name__}: {e}); video will not show cursor/keys.",
             file=sys.stderr,
         )
 
@@ -345,18 +347,18 @@ async def _handle_video_stop(
     # Playwright teardown cannot block the whole script. TimeoutError
     # is logged as a warning — the webm may still flush from the
     # Playwright context teardown at session end.
-    # v0.3.7: remove the cursor overlay before closing so the
-    # closed-page's last frame doesn't show a floating arrow
-    # in the resulting webm (the overlay lives on the page DOM
-    # which is part of the recording).
+    # v0.3.8: tear down the HUD overlay before closing so the
+    # closed-page's last frame doesn't show a floating cursor /
+    # key chip in the resulting webm. remove_overlay() also
+    # nulls out the state callbacks so a later video_start
+    # inject gets a clean slate.
     if recording_page is not None and not recording_page.is_closed():
         try:
-            from recorder_plugin.cursor import remove_cursor, stop_tracking
-            await stop_tracking(recording_page)
-            await remove_cursor(recording_page)
+            from recorder_plugin.cursor import remove_overlay
+            await remove_overlay(recording_page)
         except Exception as e:
             print(
-                f"WARNING: cursor cleanup failed for video '{name}' "
+                f"WARNING: HUD cleanup failed for video '{name}' "
                 f"({type(e).__name__}: {e}); overlay may be visible in "
                 f"last frame.",
                 file=sys.stderr,
