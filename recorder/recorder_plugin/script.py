@@ -279,6 +279,21 @@ async def _handle_video_start(rec: Recorder, step: dict, name_to_path: dict) -> 
         "recording_url": recording_url,
         "base_url": rec._last_base_url,
     }
+    # v0.3.7: inject a visible cursor overlay so the recorded webm
+    # shows a mouse pointer tracking real interactions. Playwright's
+    # recordVideo captures the DOM, not the OS cursor, so without
+    # this overlay clicks look like they happen "out of nowhere".
+    # The overlay has pointer-events:none so it never blocks clicks.
+    try:
+        from recorder_plugin.cursor import inject_cursor, start_tracking
+        await inject_cursor(rec.page)
+        await start_tracking(rec.page)
+    except Exception as e:
+        print(
+            f"WARNING: cursor overlay injection failed for video '{name}' "
+            f"({type(e).__name__}: {e}); video will not show cursor.",
+            file=sys.stderr,
+        )
 
 
 async def _handle_video_stop(
@@ -330,7 +345,22 @@ async def _handle_video_stop(
     # Playwright teardown cannot block the whole script. TimeoutError
     # is logged as a warning — the webm may still flush from the
     # Playwright context teardown at session end.
+    # v0.3.7: remove the cursor overlay before closing so the
+    # closed-page's last frame doesn't show a floating arrow
+    # in the resulting webm (the overlay lives on the page DOM
+    # which is part of the recording).
     if recording_page is not None and not recording_page.is_closed():
+        try:
+            from recorder_plugin.cursor import remove_cursor, stop_tracking
+            await stop_tracking(recording_page)
+            await remove_cursor(recording_page)
+        except Exception as e:
+            print(
+                f"WARNING: cursor cleanup failed for video '{name}' "
+                f"({type(e).__name__}: {e}); overlay may be visible in "
+                f"last frame.",
+                file=sys.stderr,
+            )
         try:
             await asyncio.wait_for(recording_page.close(), timeout=10)
         except (asyncio.TimeoutError, Exception) as e:

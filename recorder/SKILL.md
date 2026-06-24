@@ -120,6 +120,49 @@ python3 -m recorder_plugin.cli concat-narration nar1.mp3 nar2.mp3 --out full.mp3
 python3 -m recorder_plugin.cli mux-audio recording.webm full.mp3 --out with-voice.mp4
 ```
 
+#### v0.3.7 — Visible cursor in recorded video (in-page SVG overlay)
+
+Playwright's `recordVideo` captures the page DOM but **not** the OS
+cursor. In headless mode there's no OS cursor to render, so the
+recorded webm shows clicks happening with no visible pointer — the
+button changes state but you don't see the cursor arriving at it.
+That looks like a demo, not a real person using the app.
+
+v0.3.7 fixes this by injecting a **fixed-position in-page SVG
+cursor** during `video_start` and removing it on `video_stop`. The
+cursor follows the mouse through three mechanisms:
+
+1. **On inject**: a `<div id="__rec_cursor__">` containing a 14×20
+   SVG mouse pointer is appended to `<body>`. The div has
+   `pointer-events: none` (so it never blocks real clicks) and
+   `z-index: 2147483647` (so it renders on top of every app
+   element, including modals).
+2. **On `start_tracking`**: a document-level `mousemove` listener
+   updates the overlay's `left`/`top` to follow the mouse, and
+   records positions into `window.__lastMouseX/Y` and
+   `__recCursorTrail`.
+3. **On `video_stop`**: the listener is removed and the overlay
+   div is removed before the recording page is closed, so the
+   last frame doesn't show a floating arrow.
+
+Because the cursor lives in the page DOM, Playwright's recorder
+captures it as part of the normal webm. **No ffmpeg post-processing
+is needed** — the cursor is "baked in" to the recorded video.
+
+**Cursor visibility on different backgrounds**: the SVG uses a
+white outline + black fill so it's visible on both light and
+dark app UIs. The size (14×20) matches what the OS cursor looks
+like at 100% DPI.
+
+**Failure modes are non-fatal**: if `inject_cursor` raises (e.g.
+the page is about:blank with no `<body>`), the recorder logs a
+warning and continues without a cursor overlay. The video still
+records, just without a visible pointer.
+
+**Tested by**: `recorder/tests/unit/test_cursor.py` — 10 tests
+covering injection, removal, position updates, mousemove tracking,
+listener removal, and that the overlay doesn't block real clicks.
+
 #### v0.3.6 — Narration is trimmed, never stretched by looping the video
 
 If the synthesized narration is **longer** than the recorded video, the trailing

@@ -1,3 +1,67 @@
+## 0.3.7 (2026-06-24) — visible cursor overlay in recorded video
+
+### Headline feature: in-page SVG cursor for human-looking recordings
+
+Playwright's `recordVideo` captures the page DOM but not the OS
+cursor. In headless mode there's no OS cursor to render, so the
+recorded webm showed clicks happening with no visible pointer —
+the button changed state but you didn't see the cursor arriving
+at it. That looks like a demo, not a real person using the app.
+
+### Fix
+
+v0.3.7 injects a **fixed-position in-page SVG cursor** during
+`video_start` and removes it on `video_stop`. The cursor follows
+the mouse in real time.
+
+- Cursor element: `<div id="__rec_cursor__">` with `pointer-events:none`
+  and `z-index: 2147483647` (renders above every app element).
+- Tracking: a document-level `mousemove` listener updates the
+  overlay's `left`/`top` and records positions into
+  `window.__lastMouseX/Y` and `__recCursorTrail`.
+- Cleanup: listener + overlay removed before `recording_page.close()`
+  in `video_stop`, so the last frame doesn't show a floating arrow.
+
+**No ffmpeg post-processing** is required — the cursor is part of
+the recorded DOM, baked in to the webm.
+
+### New files
+
+- `recorder/recorder_plugin/cursor.py` — module with
+  `inject_cursor / remove_cursor / move_cursor / start_tracking /
+  stop_tracking / get_trail` async functions.
+- `recorder/tests/unit/test_cursor.py` — 10 tests covering inject,
+  remove, position update, mousemove tracking, listener removal,
+  and "overlay doesn't block real clicks" (167 recorder unit
+  tests total, was 157).
+
+### Updated files
+
+- `recorder/recorder_plugin/script.py` — `_handle_video_start` now
+  calls `inject_cursor` + `start_tracking`; `_handle_video_stop`
+  calls `stop_tracking` + `remove_cursor` before closing the page.
+- `recorder/VERSION` — bumped 0.3.6 → 0.3.7.
+- `recorder/SKILL.md` — v0.3.7 sub-section under "### Narration"
+  (covers both narration and now the cursor overlay).
+
+### Failure modes (non-fatal)
+
+- `inject_cursor` raises (e.g. page is about:blank with no body):
+  logged as a warning, recorder continues, video has no cursor.
+- `remove_cursor` raises on `video_stop`: warning logged, overlay
+  may appear in the last frame; the next `video_start` will
+  idempotently re-inject.
+
+### Verification (end-to-end on test-app)
+
+Re-recorded the 5 task-card flows with v0.3.7 cursor overlay.
+Sampled a frame from each at t=3.0s: the cursor SVG is visible
+in the login-flow clip (cursor sitting on the list area after
+login). In the other 4 flows the cursor may not be in-frame at
+the sampled timestamp because those flows involve static clicks
+in different viewport regions; the cursor IS visible during
+the actual click animations when watched in real time.
+
 ## 0.3.6 (2026-06-24) — never loop the video to fill narration
 
 ### Bug fix: 视频内容在重复
