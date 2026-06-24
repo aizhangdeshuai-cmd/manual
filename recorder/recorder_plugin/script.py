@@ -23,6 +23,7 @@ ALLOWED_STEP_ACTIONS = {
     "navigate", "click", "type", "wait_for", "screenshot",
     "login", "video_start", "video_stop", "set_viewport",
     "ai_annotate",  # v1.1
+    "move",  # v0.3.9: explicit cursor move (no click) for human-like gestures
 }
 
 
@@ -110,6 +111,21 @@ async def _handle_click(rec: Recorder, step: dict) -> tuple[bool, str, int]:
             return
         cx = box["x"] + box["width"] / 2
         cy = box["y"] + box["height"] / 2
+        # v0.3.9: snap the overlay cursor to the target BEFORE the
+        # glide. This matters in two cases:
+        #   (a) SPA route change since last action: the overlay
+        #       cursor's last-known position is on the old page. We
+        #       want it on the new target before we start gliding.
+        #   (b) First action after pagehide/pageshow: the cursor
+        #       was hidden; this dispatches a synthetic mousemove
+        #       that re-triggers the visibility reveal at (cx, cy).
+        try:
+            await rec.page.evaluate(
+                "([x, y]) => window.__recMoveCursorTo && window.__recMoveCursorTo(x, y)",
+                [cx, cy],
+            )
+        except Exception:
+            pass
         # 2) Move from current position to the target in 2-3 visible
         #    hops. This produces a visible cursor trail in the video.
         try:
@@ -130,6 +146,15 @@ async def _handle_click(rec: Recorder, step: dict) -> tuple[bool, str, int]:
         await rec.page.wait_for_timeout(random.randint(120, 250))
         # 4) Click
         await rec.page.mouse.click(cx, cy)
+        # 5) v0.3.9: post-click hover pause. A real user clicks
+        #    something, then pauses to look at the result before
+        #    moving on. 350-550ms feels like "read what just
+        #    changed" — short enough not to slow the video, long
+        #    enough that the click doesn't look like a teleport.
+        #    Combined with the v0.3.9 CSS-transition cursor, this
+        #    turns a robotic "click→next action" into a believable
+        #    "click→look→decide→next action".
+        await rec.page.wait_for_timeout(random.randint(350, 550))
         # Record position for next time
         try:
             await rec.page.evaluate(
@@ -164,6 +189,20 @@ async def _handle_type(rec: Recorder, step: dict) -> None:
         # Click the field to focus, then type one char at a time.
         # The click is on the same selector so it lands inside the input.
         await rec.page.click(selector, timeout=3000)
+        # v0.3.9: after the focus-click, snap the overlay cursor to
+        # the input's center so the cursor visually lands inside
+        # the text field (matches the "cursor is in the input"
+        # convention of real recordings).
+        try:
+            box = await rec.page.locator(selector).first.bounding_box()
+            if box:
+                cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+                await rec.page.evaluate(
+                    "([x, y]) => window.__recMoveCursorTo && window.__recMoveCursorTo(x, y)",
+                    [cx, cy],
+                )
+        except Exception:
+            pass
         import random
         for ch in text:
             # 60-120ms per char (avg ~90ms) — looks like fast typing.
@@ -176,6 +215,83 @@ async def _handle_type(rec: Recorder, step: dict) -> None:
 async def _handle_wait(rec: Recorder, step: dict) -> int:
     spec = WaitSpec.from_dict(step)
     return await dispatch_wait(rec.page, spec)
+
+
+async def _handle_move(rec: Recorder, step: dict) -> None:
+    """v0.3.9: explicit cursor move step. v0.3.4's _handle_click
+    already moves the cursor before clicking, but sometimes the
+    recorder author wants to move the cursor WITHOUT clicking —
+    e.g. hover over a tooltip target, point at a chart before
+    talking about it, or just to give the user a beat to read
+    the page before the next action.
+
+    Supports:
+      - selector (string): moves to the element's center
+      - x, y (numbers): moves to absolute viewport coords
+      - duration_ms (optional): overrides the default 250-450ms
+        glide. Used to slow the move for a deliberate "look here"
+        gesture (use 800-1500ms) or speed it up for a quick
+        gesture (100-200ms).
+
+    The glide is 12-20 steps with ease-in-out cubic + ±1.5px
+    jitter, so the cursor arcs naturally to the target.
+    """
+    import random
+    from .selector_resolver import SelectorResolver
+    if "selector" in step and step["selector"]:
+        resolver = SelectorResolver()
+        selector = step["selector"]
+        async def resolve_to_xy(variant: str):
+            loc = rec.page.locator(variant).first
+            await loc.wait_for(state="visible", timeout=3000)
+            box = await loc.bounding_box()
+            if box is None:
+                return None
+            return (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        ok, winning, _ = await resolver.attempt_async(selector, resolve_to_xy)
+        if not ok or winning is None:
+            print(f"WARNING: move selector {selector!r} not found, skipping",
+                  file=sys.stderr)
+            return
+        cx, cy = winning
+    elif "x" in step and "y" in step:
+        cx, cy = float(step["x"]), float(step["y"])
+    else:
+        print("WARNING: move step needs 'selector' or 'x'+'y', skipping",
+              file=sys.stderr)
+        return
+    # Glide
+    if step.get("duration_ms"):
+        total = float(step["duration_ms"])
+        n = max(8, min(40, int(total / 12)))
+    else:
+        n = random.randint(12, 20)
+        total = random.randint(250, 450)
+    try:
+        cur = await rec.page.evaluate(
+            "() => ({ x: window.__lastMouseX ?? 0, y: window.__lastMouseY ?? 0 })"
+        )
+        sx, sy = cur.get("x", 0), cur.get("y", 0)
+    except Exception:
+        sx, sy = 0, 0
+    per_step_ms = max(6, int(total / n))
+    for i in range(1, n + 1):
+        t = i / n
+        e = t * t * (3 - 2 * t)
+        mx = sx + (cx - sx) * e + random.uniform(-1.5, 1.5)
+        my = sy + (cy - sy) * e + random.uniform(-1.5, 1.5)
+        await rec.page.mouse.move(mx, my)
+        await rec.page.wait_for_timeout(per_step_ms)
+    # Optional: hover dwell at the destination
+    dwell = step.get("dwell_ms", 0)
+    if dwell:
+        await rec.page.wait_for_timeout(int(dwell))
+    try:
+        await rec.page.evaluate(
+            f"() => {{ window.__lastMouseX = {cx}; window.__lastMouseY = {cy}; }}"
+        )
+    except Exception:
+        pass
 
 
 async def _handle_screenshot(
@@ -701,6 +817,9 @@ async def run_script(script_path: Path) -> dict:
                             break
                 elif action == "type":
                     await _handle_type(rec, step)
+                elif action == "move":
+                    # v0.3.9: explicit cursor move (no click).
+                    await _handle_move(rec, step)
                 elif action == "wait_for":
                     await _handle_wait(rec, step)
                 elif action == "screenshot":

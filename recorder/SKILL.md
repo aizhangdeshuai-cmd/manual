@@ -120,6 +120,103 @@ python3 -m recorder_plugin.cli concat-narration nar1.mp3 nar2.mp3 --out full.mp3
 python3 -m recorder_plugin.cli mux-audio recording.webm full.mp3 --out with-voice.mp4
 ```
 
+#### v0.3.9 — Human-looking cursor (smooth motion, idle-fade, nav-aware)
+
+v0.3.8 shipped a cursor that was visible but had five "demo"
+tells that made the video look robotic instead of recorded:
+
+  1. Cursor teleported on every mousemove — every
+     `setCursorPos()` was a snap, no interpolation.
+  2. Cursor stayed visible after page navigation at the
+     last position from the old page (Playwright headless
+     doesn't fire `mousemove` after navigation).
+  3. Click ripple stayed red and visible in the new page's
+     empty space (because the ripple was tied to viewport
+     coords, not the new page's content).
+  4. No idle behavior — a frozen cursor looked pasted on,
+     not like someone waiting to see a result.
+  5. Keystroke HUD was bottom-center 80vw — too intrusive.
+
+v0.3.9 fixes all five with one mental model: "treat the
+cursor like a real user's cursor, not a debug marker."
+
+**What changed in cursor.py**:
+
+- **CSS `transition: transform 0.08s ease-out`** on the
+  cursor element. Every `setCursorPos()` still snaps the
+  position, but the GPU interpolates between frames so the
+  motion looks smooth — the way a real OS cursor glides
+  across the screen. Inspired by tecnomanu/video-docs-builder
+  (MIT, 2026) which uses the same trick.
+- **Visibility gating**: cursor is `opacity: 0` by default.
+  It reveals on the first `mousemove` of the page session.
+  On `pagehide` (about to navigate) it fades back to 0 and
+  in-flight ripples are cleared. The new page's first
+  `mousemove` re-reveals at the new position. No more ghost
+  cursor on the new page.
+- **Idle fade** (700ms): if no `mousemove` for 700ms, the
+  cursor fades to opacity 0. Any new `mousemove` brings it
+  back. This is what handles the "post-login cursor floats
+  in empty space" case: Playwright headless doesn't fire
+  `mousemove` after a SPA route change, so the cursor
+  naturally fades within 700ms.
+- **Outer pulse ring** behind the cursor: a 26px circle
+  that pulses every 1.8s. Makes a stationary cursor feel
+  "alive" so the viewer doesn't think the recording froze.
+- **Ripple recolored from red to blue**
+  (`rgba(59,130,246,0.7)`): blue says "action here" and
+  matches the cursor ring + typical app button accent. Red
+  is "error" territory and read as "something went wrong".
+- **Keystroke HUD moved to bottom-right**, narrower (28vw),
+  85% opacity, smaller chips. Bottom-center was intrusive;
+  bottom-right is where most apps put toast notifications,
+  so the eye learns to glance there for supporting info
+  without it being the focal point.
+
+**What changed in script.py**:
+
+- **`__recMoveCursorTo(x, y)` global** in the listener.
+  The recorder calls this via `page.evaluate(...)` right
+  before every `click` and `type` to snap the overlay
+  cursor to the target element's center *before* the 8-18
+  step cubic-ease glide. Combined with the CSS transition,
+  this means:
+    - In SPA route-change scenarios (login → dashboard) the
+      cursor reappears at the next action's target, not at
+      a stale position from the previous page.
+    - On first action after `pageshow`, the synthetic
+      `mousemove` re-triggers the visibility reveal so the
+      cursor shows at the right spot.
+- **Post-click hover dwell** (350-550ms): real users
+  click, then pause to look at the result before moving on.
+  v0.3.4 had a hover pause before the click but nothing
+  after; combined with the CSS transition, this turns a
+  robotic "click→next action" into a believable
+  "click→look→decide→next action".
+- **New `move` action** for explicit cursor moves without
+  clicking. Supports `selector` or `x`+`y`, optional
+  `duration_ms` (overrides the default 250-450ms glide),
+  and optional `dwell_ms` (pause at destination). Pattern
+  adapted from snomiao/demowright (MIT). Example:
+
+  ```json
+  { "action": "move", "selector": "h1", "duration_ms": 800, "dwell_ms": 400 }
+  ```
+
+  This glides the cursor to the `<h1>` over 800ms (slow,
+  deliberate) then dwells there for 400ms (let the user
+  read the heading) before the next action.
+
+**Why this all matters for the manual**: the v0.3.8 video
+showed clicks happening at the right places but the cursor
+teleported to each one. Viewers read this as "the screen
+is being driven by a script, not a person". v0.3.9 makes
+the cursor glide smoothly between targets, fades when
+nothing's happening, reappears at the right place on each
+new page, and uses blue ripples (action) instead of red
+(errors). Net result: the video looks like a real person
+recorded it, not a test rig.
+
 #### v0.3.8 — Cursor actually follows the mouse + keystroke HUD + click ripples
 
 v0.3.7 introduced a visible cursor overlay but the cursor was

@@ -1,3 +1,154 @@
+## 0.3.9 (2026-06-24) — human-looking cursor: smooth motion, idle-fade, nav-aware
+
+The v0.3.8 cursor was visible but had five "demo" tells that
+made the video look robotic instead of recorded:
+
+1. **Cursor teleported on every mousemove** — every
+   `setCursorPos()` was a snap from old to new with no
+   interpolation. The eye reads this as "machine, not person".
+2. **Cursor stayed visible after page navigation** — at the
+   last position from the old page. With Playwright headless
+   never firing `mousemove` after navigation, the cursor
+   element kept its old coords and the new page's empty area
+   had a "ghost cursor" floating in the middle.
+3. **Click ripple stayed red and visible** in the new page's
+   empty space (because the ripple was tied to viewport
+   coords, not the new page's content).
+4. **No idle behavior** — a frozen cursor at a click point
+   looked pasted on, not like someone waiting to see a
+   result.
+5. **Keystroke HUD was bottom-center 80vw** — wide and
+   intrusive, pulled eyes away from the actual demo.
+
+v0.3.9 fixes all five with one mental model: "treat the
+cursor like a real user's cursor, not a debug marker."
+
+### What changed
+
+#### cursor.py — the core fix
+
+- **CSS transition on the cursor**: `transition: transform
+  0.08s ease-out`. Every successive `setCursorPos()` still
+  snaps the position, but the GPU interpolates between
+  frames so the motion looks smooth — the way a real OS
+  cursor glides across the screen.
+- **Visibility gating**: cursor is `opacity: 0` by default.
+  It reveals on the first `mousemove` of the page session.
+  On `pagehide` (about to navigate) it fades back to 0 and
+  in-flight ripples are cleared. The new page's first
+  `mousemove` re-reveals at the new position. No more ghost
+  cursor on the new page.
+- **Idle fade**: if no `mousemove` for 700ms, the cursor
+  fades to opacity 0. Any new `mousemove` brings it back.
+  Handles the "post-login cursor floats in empty space" case:
+  Playwright headless doesn't fire `mousemove` after a SPA
+  route change, so the cursor naturally fades within 700ms.
+- **Outer pulse ring** behind the cursor: a 26px circle that
+  pulses every 1.8s. Makes a stationary cursor feel "alive"
+  so the viewer doesn't think the recording froze.
+- **Ripple recolored from red to blue** (`rgba(59,130,246,0.7)`):
+  blue says "action here" and matches the cursor ring + typical
+  app button accent. Red is "error" territory and read as
+  "something went wrong".
+- **Keystroke HUD moved to bottom-right**, narrower (28vw),
+  85% opacity, smaller chips. Bottom-center was intrusive;
+  bottom-right is where most apps put toast notifications, so
+  the eye learns to glance there for supporting info without
+  it being the focal point.
+
+#### script.py — coordinated moves
+
+- **`__recMoveCursorTo(x, y)` global** in the listener. The
+  recorder calls this via `page.evaluate(...)` right before
+  every `click` and `type` to snap the overlay cursor to the
+  target element's center *before* the 8-18 step cubic-ease
+  glide. Combined with the CSS transition, this means:
+  - In SPA route-change scenarios (login → dashboard) the
+    cursor reappears at the next action's target, not at a
+    stale position from the previous page.
+  - On first action after `pageshow`, the synthetic
+    `mousemove` re-triggers the visibility reveal so the
+    cursor shows at the right spot.
+- **Post-click hover dwell** (350-550ms): real users click,
+  then pause to look at the result before moving on. v0.3.4
+  had a hover pause before the click but nothing after;
+  combined with the CSS transition, the post-click dwell
+  turns a robotic "click→next action" into a believable
+  "click→look→decide→next action".
+- **New `move` action** for explicit cursor moves without
+  clicking. Supports `selector` or `x`+`y`, optional
+  `duration_ms` (overrides the default 250-450ms glide) and
+  optional `dwell_ms` (pause at destination). Pattern adapted
+  from snomiao/demowright (MIT).
+
+### Inspiration
+
+- **CSS transition trick** inspired by tecnomanu/video-docs-builder
+  (MIT, 2026): the same one-line `transition: transform 0.06s`
+  that turns their red-dot cursor into smooth motion.
+- **addInitScript + DOM-injector split** is still from
+  snomiao/demowright (MIT, 2026); v0.3.8 credited, v0.3.9
+  extends with pagehide/pageshow awareness.
+- **`move` action** is the demowright "gesture primitive"
+  but for our JSON-driven recorder DSL.
+
+### New / changed files
+
+- `recorder/recorder_plugin/cursor.py` — rewritten (519 lines),
+  adds CSS transition, pagehide/pageshow handlers, idle-fade
+  timer, pulse ring, blue ripple, repositioned keystroke HUD.
+- `recorder/recorder_plugin/script.py` — adds `_handle_move`,
+  registers `move` in the dispatch loop + `ALLOWED_STEP_ACTIONS`,
+  calls `__recMoveCursorTo` before click/type, adds post-click
+  hover dwell.
+- `recorder/tests/unit/test_cursor.py` — 18 tests, was 11.
+  New tests:
+    - `test_cursor_has_css_transition` — guards the
+      transition CSS (regression: someone might delete it
+      while refactoring).
+    - `test_cursor_starts_hidden_until_first_mousemove` —
+      guards the visibility-gating logic.
+    - `test_pagehide_hides_cursor_and_clears_ripples` —
+      guards the nav-aware fade-out + ripple cleanup.
+    - `test_listener_tracks_pagehide_and_pageshow` — guards
+      the addInitScript listener registering both events.
+    - `test_ripple_is_blue_not_red` — guards the color
+      decision (red is wrong; would look like an error).
+    - `test_cursor_idle_fades_after_no_movement` — guards
+      the 700ms idle timer.
+    - `test_mousemove_resets_idle_fade_timer` — guards that
+      active cursor stays visible.
+  Recorder unit-test count: 175 (was 168 in v0.3.8).
+- `recorder/tests/unit/test_script_dispatch.py` — bumped the
+  `ALLOWED_STEP_ACTIONS` count expectation from 10 to 11.
+
+### What did NOT change
+
+- The recorder CLI, the LLM-facing step DSL, the
+  `recorder-taskhub.json` script format (other than the new
+  optional `move` step). Existing scripts work unchanged.
+- The narration pipeline (edge-tts). The cursor improvements
+  compose with narration: the cursor says "where you are
+  visually", the narration says "what to do".
+- The build_standalone / file:// inlining. v0.3.9 videos
+  are slightly larger (~5-10% per file) because the cursor
+  motion has more frames; otherwise identical.
+
+### Upgrade notes
+
+No state cache cleanup needed for v0.3.9 — the cursor is
+injected at video_start and the listener is context-level,
+so both already handle the "fresh page" case. If you re-run
+the recorder on the same script, you'll get the v0.3.9
+cursor automatically. If you want to *replace* the existing
+v0.3.8 mp4s, clear the recorder state cache the same way as
+for v0.3.8 (see v0.3.8 CHANGELOG for the exact commands).
+
+### Versions
+
+- Skill: 1.0.3 → 1.0.4.
+- Recorder: 0.3.8 → 0.3.9.
+- Recorder unit tests: 168 → 175.
 ## 0.3.8 (2026-06-24) — cursor overlay actually follows the mouse + keystroke HUD + click ripples
 
 ### Bug

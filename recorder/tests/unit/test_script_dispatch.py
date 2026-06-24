@@ -31,9 +31,8 @@ def test_allowed_step_actions_set():
     assert allowed is not None, "ALLOWED_STEP_ACTIONS not found"
     assert isinstance(allowed, set)
     assert all(isinstance(a, str) for a in allowed)
-    # Must be 10 (v0.2.4: set_viewport + ai_annotate are the 2 we
-    # explicitly added; SKILL.md step-actions table claims 10)
-    assert len(allowed) == 10, f"expected 10 step actions, got {len(allowed)}: {allowed}"
+    # v0.3.9: 11 actions (added 'move' for explicit cursor move).
+    assert len(allowed) == 11, f"expected 11 step actions, got {len(allowed)}: {allowed}"
 
 
 def test_every_allowed_action_has_an_elif_branch():

@@ -267,6 +267,173 @@ class TestHudOverlay(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["cx"], 333, "listener did not survive navigation")
         self.assertEqual(state["cy"], 444, "listener did not survive navigation")
 
+    async def test_cursor_has_css_transition(self) -> None:
+        """v0.3.9: the cursor overlay must have a CSS `transition`
+        so that successive setCursorPos() calls are visually
+        interpolated by the GPU, not snap-instant. Without this
+        the cursor teleports on every mousemove and looks robotic.
+        """
+        css = await self._page.evaluate(
+            "() => { const e = document.getElementById('__rec_cursor__');"
+            "        return e ? getComputedStyle(e).transition : null; }"
+        )
+        self.assertIsNotNone(css, "cursor element missing after inject")
+        # `transform` must appear in the transition property so the
+        # GPU interpolates position changes.
+        self.assertIn("transform", css,
+                      f"cursor missing transform transition: {css!r}")
+
+    async def test_cursor_starts_hidden_until_first_mousemove(self) -> None:
+        """v0.3.9: the cursor is opacity:0 by default. It only
+        becomes visible on the first real mousemove. This is what
+        prevents the 'ghost cursor at 50%/50%' on a freshly-loaded
+        page."""
+        opacity = await self._page.evaluate(
+            "() => getComputedStyle(document.getElementById('__rec_cursor__')).opacity"
+        )
+        self.assertEqual(float(opacity), 0.0,
+                         f"cursor should start hidden, got opacity={opacity}")
+        # Now fire a mousemove — it should reveal.
+        await self._page.evaluate(
+            """() => document.dispatchEvent(new MouseEvent('mousemove',
+                   { clientX: 100, clientY: 100, bubbles: true }))"""
+        )
+        # Give the CSS transition a tick to settle.
+        await self._page.wait_for_timeout(250)
+        opacity = await self._page.evaluate(
+            "() => getComputedStyle(document.getElementById('__rec_cursor__')).opacity"
+        )
+        self.assertEqual(float(opacity), 1.0,
+                         f"cursor should be visible after mousemove, got opacity={opacity}")
+
+    async def test_pagehide_hides_cursor_and_clears_ripples(self) -> None:
+        """v0.3.9: when the page is about to navigate away, the
+        cursor should fade out and any in-flight ripples should be
+        removed. This is what prevents a click ripple from
+        appearing in empty space on the next page."""
+        # Make the cursor visible first.
+        await self._page.evaluate(
+            """() => document.dispatchEvent(new MouseEvent('mousemove',
+                   { clientX: 200, clientY: 200, bubbles: true }))"""
+        )
+        await self._page.wait_for_timeout(250)
+        # Add a ripple (simulate a click).
+        await self._page.evaluate(
+            """() => document.dispatchEvent(new MouseEvent('mousedown',
+                   { clientX: 200, clientY: 200, bubbles: true }))"""
+        )
+        # Fire pagehide (about to navigate).
+        await self._page.evaluate(
+            """() => window.dispatchEvent(new Event('pagehide'))"""
+        )
+        # Wait for the CSS opacity transition (0.2s) to complete.
+        await self._page.wait_for_timeout(300)
+        # Cursor should now be hidden.
+        opacity = await self._page.evaluate(
+            """() => parseFloat(getComputedStyle(
+                   document.getElementById('__rec_cursor__')).opacity)"""
+        )
+        self.assertEqual(opacity, 0.0,
+                         f"cursor should hide on pagehide, got opacity={opacity}")
+        # Ripples should be cleared.
+        ripple_count = await self._page.evaluate(
+            """() => document.querySelectorAll('.__rec_ripple__').length"""
+        )
+        self.assertEqual(ripple_count, 0,
+                         f"ripples should be cleared on pagehide, got {ripple_count}")
+
+    async def test_listener_tracks_pagehide_and_pageshow(self) -> None:
+        """v0.3.9: the addInitScript listener must register
+        pagehide + pageshow listeners so the DOM injector can
+        hide/reveal the cursor on navigation."""
+        has_pagehide = await self._page.evaluate(
+            """() => {
+              // Fire a pagehide and check the state flag was set.
+              window.dispatchEvent(new Event('pagehide'));
+              return window.__recHud.navInFlight === true;
+            }"""
+        )
+        self.assertTrue(has_pagehide,
+                        "listener should set navInFlight=true on pagehide")
+
+    async def test_ripple_is_blue_not_red(self) -> None:
+        """v0.3.9: ripple color was changed from red to blue
+        (matches the cursor ring + typical app button accent).
+        Red is 'error' territory; blue is 'action here'."""
+        # Trigger a mousedown and check the ripple's border color.
+        await self._page.evaluate(
+            """() => document.dispatchEvent(new MouseEvent('mousedown',
+                   { clientX: 300, clientY: 300, bubbles: true }))"""
+        )
+        # Get the computed border-color of the ripple. (May take a
+        # tick for the element to be appended.)
+        await self._page.wait_for_timeout(50)
+        border = await self._page.evaluate(
+            """() => {
+              const r = document.querySelector('.__rec_ripple__');
+              return r ? getComputedStyle(r).borderColor : null;
+            }"""
+        )
+        self.assertIsNotNone(border, "ripple not created on mousedown")
+        # Should be a blue-ish color, not red. The exact RGB may
+        # vary, but blue's red component should be < 100.
+        # Parse 'rgb(R, G, B)' or 'rgba(R, G, B, A)'.
+        import re
+        m = re.search(r"rgba?\((\d+),\s*(\d+),\s*(\d+)", border)
+        self.assertIsNotNone(m, f"could not parse border color: {border!r}")
+        r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        self.assertLess(r, 100, f"ripple should be blue (low R), got R={r}")
+        self.assertGreater(b, 100, f"ripple should be blue (high B), got B={b}")
+
+    async def test_cursor_idle_fades_after_no_movement(self) -> None:
+        """v0.3.9: the cursor should fade to opacity 0 after
+        ~700ms of no mousemove. This is what handles the
+        'cursor floats in empty space after a page transition'
+        case: Playwright headless doesn't fire mousemove after
+        navigation, so the cursor naturally fades if no real
+        action happens within 700ms."""
+        # Reveal the cursor with a mousemove.
+        await self._page.evaluate(
+            """() => document.dispatchEvent(new MouseEvent('mousemove',
+                   { clientX: 100, clientY: 100, bubbles: true }))"""
+        )
+        # Wait for CSS opacity transition (0.2s) to complete.
+        await self._page.wait_for_timeout(300)
+        opacity = await self._page.evaluate(
+            """() => parseFloat(getComputedStyle(
+                   document.getElementById('__rec_cursor__')).opacity)"""
+        )
+        self.assertEqual(opacity, 1.0, f"cursor should be visible after mousemove, got {opacity}")
+        # Wait > 700ms (idle fade threshold) + 200ms (CSS transition).
+        await self._page.wait_for_timeout(1000)
+        opacity = await self._page.evaluate(
+            """() => parseFloat(getComputedStyle(
+                   document.getElementById('__rec_cursor__')).opacity)"""
+        )
+        self.assertEqual(opacity, 0.0,
+                         f"cursor should fade after idle, got {opacity}")
+
+    async def test_mousemove_resets_idle_fade_timer(self) -> None:
+        """v0.3.9: every mousemove should reset the idle-fade
+        timer, so a cursor that's actively moving stays visible.
+        A cursor that's been still for >700ms should hide."""
+        # Fire mousemove every 200ms for 1.5s — timer keeps resetting,
+        # cursor should stay visible the whole time.
+        for _ in range(7):
+            await self._page.evaluate(
+                """() => document.dispatchEvent(new MouseEvent('mousemove',
+                       { clientX: 100 + Math.random() * 10,
+                         clientY: 100 + Math.random() * 10,
+                         bubbles: true }))"""
+            )
+            await self._page.wait_for_timeout(200)
+        opacity = await self._page.evaluate(
+            """() => parseFloat(getComputedStyle(
+                   document.getElementById('__rec_cursor__')).opacity)"""
+        )
+        self.assertEqual(opacity, 1.0,
+                         f"cursor should stay visible while moving, got {opacity}")
+
 
 class TestCursorModuleShape(unittest.TestCase):
     """Static checks on the cursor module — run without a browser."""

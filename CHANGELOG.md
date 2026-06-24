@@ -1,5 +1,86 @@
 # Changelog
 
+## 1.0.4 (2026-06-24) — recorder v0.3.9: human-looking cursor
+
+Followup to v1.0.3. The v0.3.8 cursor was visible but had
+five "demo" tells that made the video look robotic instead
+of recorded:
+
+1. Cursor teleported on every mousemove (no interpolation
+   between positions).
+2. Cursor stayed visible after page navigation at the last
+   position from the old page (Playwright headless doesn't
+   fire mousemove after navigation).
+3. Click ripple stayed red and visible in the new page's
+   empty space.
+4. No idle behavior — a frozen cursor looked pasted on.
+5. Keystroke HUD was bottom-center 80vw — too intrusive.
+
+v0.3.9 fixes all five:
+
+- **CSS transition on the cursor** (`transform 0.08s
+  ease-out`): every `setCursorPos()` still snaps but the
+  GPU interpolates — the way a real OS cursor glides.
+- **Visibility gating**: cursor is opacity 0 by default,
+  reveals on first mousemove of the page. On pagehide
+  it fades back to 0; new page's first mousemove
+  re-reveals at the new position.
+- **Idle fade**: 700ms of no movement → cursor fades
+  to opacity 0. Handles the "post-login cursor floats
+  in empty space" case.
+- **Outer pulse ring** behind the cursor: 26px circle
+  pulsing every 1.8s. Makes a stationary cursor feel
+  "alive".
+- **Ripple recolored red → blue** (`rgba(59,130,246,0.7)`).
+  Blue says "action here" and matches app button accents.
+- **Keystroke HUD moved to bottom-right**, narrower (28vw),
+  smaller chips, 85% opacity.
+
+In script.py: a new `move` action (for explicit cursor
+moves without clicking, with optional `duration_ms` and
+`dwell_ms`), post-click hover dwell (350-550ms, the
+"look at what just happened" pause), and
+`__recMoveCursorTo(x,y)` global that's called before every
+click/type to snap the overlay cursor to the target
+*before* the cubic-ease glide.
+
+**Inspiration**: CSS transition trick from
+tecnomanu/video-docs-builder (MIT, 2026). `move` action
+and addInitScript split still from snomiao/demowright
+(MIT, 2026).
+
+**What changed in the skill itself**: zero. This is a
+recorder-only fix. The recorder/SKILL.md v0.3.9 sub-section
+covers the new `move` step.
+
+**Versions**: skill 1.0.3 → 1.0.4; recorder 0.3.8 → 0.3.9;
+recorder unit tests 168 → 175.
+
+### Manual probes (test-app, fresh recording)
+
+- Login flow: cursor glides to account field, types with
+  keystroke HUD `a d m i n`, glides to password, types
+  (HUD shows `a d m i n a d m i n`), glides to login
+  button, post-click hover dwell 350-550ms, page route
+  changes to dashboard, cursor idle-fades within 700ms.
+  No more ghost cursor in the dashboard's empty area.
+- Dashboard view: cursor at sidebar's "全部" with blue
+  pulse ring. Click "待办" → cursor glides → list filters.
+  No teleport, no ripple-in-empty-space.
+
+### What changed in the skill itself
+
+- `recorder/recorder_plugin/cursor.py` — rewritten (519
+  lines, was 342). CSS transition, pagehide/pageshow,
+  idle-fade, pulse ring, blue ripple, repositioned HUD.
+- `recorder/recorder_plugin/script.py` — adds `_handle_move`,
+  registers `move` action, calls `__recMoveCursorTo`
+  before click/type, adds post-click hover dwell.
+- `recorder/tests/unit/test_cursor.py` — 18 tests (was 11).
+  7 new tests covering transition, visibility gating,
+  pagehide cleanup, listener events, ripple color, idle
+  fade, idle reset.
+
 ## 1.0.3 (2026-06-24) — recorder v0.3.8: cursor actually follows the mouse
 
 Followup to v1.0.2. The recorder's "visible cursor" feature
