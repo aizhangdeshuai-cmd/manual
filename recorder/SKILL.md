@@ -120,6 +120,78 @@ python3 -m recorder_plugin.cli concat-narration nar1.mp3 nar2.mp3 --out full.mp3
 python3 -m recorder_plugin.cli mux-audio recording.webm full.mp3 --out with-voice.mp4
 ```
 
+#### v0.3.11 — Humanized cursor motion (bezier bow + smooth overshoot + 3-mode typing)
+
+The v0.3.9 cursor glided in a straight line with constant per-step
+delay. v0.3.10 fixed the blank-start issue, but a viewer could
+still tell the glides were "robotic": the cursor teleported along
+a line, every step took the same time, and the typing cadence was
+a metronome. v0.3.11 fixes this with a new `human_motion` module
+that randomizes the five things that read as "real human" instead
+of "script":
+
+1. **Bezier bow** — the cursor's path is a quadratic bezier whose
+   control point is offset *perpendicular* to the start-end
+   vector (left or right, randomized per glide). Real hand
+   trajectories curve because the hand pivots at the
+   wrist/elbow; the eye reads a straight-line glide as
+   mechanical.
+2. **Smooth overshoot near the end** — in the t=0.85-0.98 range
+   the path adds a sinusoidal bump (1-4px past the target along
+   the start-end vector) then a recovery oscillation in
+   t=0.98-1.0 that lands the cursor ON the target. This is the
+   "hand physics" of real cursor use — momentum carries the
+   cursor slightly past where the user intended, then the hand
+   corrects.
+3. **Trapezoid per-step delay** — `initial_ms`, `peak_ms`,
+   `final_ms` scaled by distance, applied as
+   start-fast / mid-slow / settle (e.g. 12-18ms → 7-11ms →
+   16-26ms on a 500+px move). Constant per-step delay reads as
+   a screensaver; deceleration into the target reads as
+   "a person was aiming".
+4. **3-mode typing mixture** — 75% "flow" (50-95ms), 20% "burst"
+   (30-55ms), 5% "hesitate" (180-350ms). Real typing has bursts
+   and pauses, not a fixed cadence.
+5. **Triangular hover + post-click pauses** — most are 120-250ms
+   (hover) and 200-400ms (post-click), with a ~1.5% chance of a
+   1-2s "wait, I need to read this" hover and a ~5% chance of a
+   1-2s "the user is reading a modal" post-click. The 5% / 1.5%
+   long pauses are what make the recording read as "a person
+   thinking", not "a script that knows what to click next".
+
+The 5 algorithm changes all live in one new module
+(`recorder_plugin/human_motion.py`) so they can be tuned
+independently from `script.py`'s step executor.
+
+**Why t=0.85 (not earlier) for the overshoot**: a quadratic
+bezier at t<0.85 is still 150+ pixels short of the target on a
+1000px move. Adding an overshoot that far from the target would
+be invisible — the bump would be on a position the viewer can't
+visually distinguish from the rest of the glide. Concentrating
+the overshoot near the end (where the bezier is near the target)
+makes the "hand correction" wobble visible without making the
+cursor look glitchy mid-glide.
+
+**Why a sinusoidal bump (not a linear one)**: a linear bump
+would have a sharp peak at t=0.915 that the eye reads as
+"snapped" or "teleported". The sine envelope produces smooth
+acceleration into and out of the peak, which reads as a single
+fluid correction.
+
+**Why 1-4px (not 10-20px) for the overshoot magnitude**: at
+10+px the cursor looks glitchy / lossy. At 1-4px it just looks
+like the user wasn't 100% precise — which is what real cursor
+use actually looks like. The `min(distance * 0.012, 4.5)`
+formula scales with distance but caps at 4.5px so a 1000px move
+doesn't have a 12px overshoot.
+
+All 11 functions in `human_motion.py` accept an optional
+`rng=random.Random(seed)` for deterministic unit tests. The
+default is to use the global `random` module.
+
+Test count: 218 (was 195 in v0.3.10; +23 new tests in
+`tests/unit/test_human_motion.py`).
+
 #### v0.3.10 — Frame-accurate trim of leading blank frames
 
 Every recorded video started with 40-300ms of a blank white

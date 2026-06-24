@@ -1,3 +1,125 @@
+## 0.3.11 (2026-06-24) — humanized cursor motion: bezier bow + smooth overshoot + 3-mode typing
+
+The v0.3.9 cursor glided in a straight line with constant per-step
+delay. The v0.3.10 trim fix made the videos start cleanly, but a
+viewer could still tell the glides were "robotic": the cursor
+teleported along a line instead of curving, every step took the
+same time, and the typing cadence was a metronome.
+
+v0.3.11 fixes this with a new `human_motion` module that randomizes
+the five things that read as "real human" instead of "script":
+
+1. **Bezier bow** — the cursor's path is a quadratic bezier whose
+   control point is offset *perpendicular* to the start-end vector
+   (left or right, randomized per glide). Real hand trajectories
+   curve because the hand pivots at the wrist/elbow; the eye
+   reads a straight-line glide as mechanical.
+2. **Smooth overshoot near the end** — in the t=0.85-0.98 range the
+   path adds a sinusoidal bump (1-4px past the target along the
+   start-end vector) then a recovery oscillation in t=0.98-1.0
+   that lands the cursor ON the target. This is the "hand physics"
+   of real cursor use — momentum carries the cursor slightly past
+   where the user intended, then the hand corrects.
+3. **Trapezoid per-step delay** — initial_ms, peak_ms, final_ms
+   scaled by distance, applied as start-fast / mid-slow / settle
+   (e.g. 12-18ms → 7-11ms → 16-26ms on a 500+px move). Constant
+   per-step delay reads as a screensaver; deceleration into the
+   target reads as "a person was aiming".
+4. **3-mode typing mixture** — 75% "flow" (50-95ms), 20% "burst"
+   (30-55ms), 5% "hesitate" (180-350ms). Real typing has bursts
+   and pauses, not a fixed cadence.
+5. **Triangular hover + post-click pauses** — most are 120-250ms
+   (hover) and 200-400ms (post-click), with a ~1.5% chance of a
+   1-2s "wait, I need to read this" hover and a ~5% chance of a
+   1-2s "the user is reading a modal" post-click. The 5% / 1.5%
+   long pauses are what make the recording read as "a person
+   thinking", not "a script that knows what to click next".
+
+The 5 algorithm changes all live in one new module
+(`recorder_plugin/human_motion.py`) so they can be tuned
+independently from `script.py`'s step executor.
+
+### What changed
+
+#### recorder_plugin/human_motion.py (new, 390 lines)
+
+Centralizes the random-distribution helpers:
+
+- **`_bezier_point(t, p0, p1, p2)`** — quadratic bezier
+  interpolation. Used to compute the bowed path.
+- **`_perpendicular_offset(sx, sy, cx, cy)`** — returns a unit
+  vector perpendicular to (start → end). Used to offset the
+  bezier control point.
+- **`_overshoot_factor(t)`** — the sinusoidal bump + recovery
+  described above. 0 outside (0.85, 1.0), peaks at ~1.0 near
+  t=0.915.
+- **`_step_count(distance, *, rng=None)`** — distance-scaled
+  step count (6-10 for <60px, up to 22-32 for 500+px). rng
+  parameter is for test determinism.
+- **`_per_step_delay(distance, *, rng=None)`** — returns
+  (initial_ms, peak_ms, final_ms) per distance bucket. Applied
+  as a trapezoid across the glide.
+- **`glide_samples(sx, sy, cx, cy, *, rng=None)`** — the main
+  generator. Yields (x, y, delay_ms) tuples. Trivial glides
+  (distance < 2px) yield one sample; normal glides yield
+  6-32 samples depending on distance.
+- **`type_delay_ms(rng=None)`** — mixture-distribution per-char
+  delay (flow / burst / hesitate, weights 75/20/5).
+- **`hover_pause_ms(min, max, *, hesitating=False, rng=None)`** —
+  triangular in the requested range, or 1-2s when `hesitating=True`.
+- **`post_click_pause_ms(rng=None)`** — 95% triangular 200-400ms,
+  5% uniform 1-2s.
+- **`idle_jitter(seed=0)`** — generator of (dx, dy, delay) tuples
+  for the cursor's idle-state sub-pixel drift. Not yet wired into
+  script.py; reserved for a follow-up.
+
+All 11 functions accept an optional `rng=random.Random(seed)` for
+deterministic unit tests. The default is to use the global
+`random` module.
+
+#### recorder_plugin/script.py
+
+Wired `human_motion` into the three places that used to use
+mechanical motion:
+
+- **`_handle_click` (lines 136-160)** — replaced the linear
+  ease-in-out glide with `glide_samples()` (curve + overshoot),
+  replaced `random.randint(120, 250)` hover with
+  `hover_pause_ms(120, 250, hesitating=...)` (triangular +
+  1.5% 1-2s pause), replaced `random.randint(350, 550)`
+  post-click with `post_click_pause_ms()` (triangular + 5%
+  1-2s).
+- **`_handle_type` (lines 207-215)** — replaced per-char
+  `random.randint(60, 120)` with `type_delay_ms()` (3-mode
+  mixture).
+- **`_handle_move` (lines 282-290)** — replaced the linear
+  ease-in-out glide with `glide_samples()` (same as click).
+
+#### tests/unit/test_human_motion.py (new, 23 tests)
+
+- 4 tests for `_bezier_point` and `_perpendicular_offset` —
+  endpoints, midpoint behavior, orthogonality, unit length.
+- 4 tests for `_overshoot_factor` — zero at endpoints, peak
+  in the bump range, smooth recovery.
+- 7 tests for `glide_samples` — finite samples, all delays
+  positive, ends near target, step count scales with
+  distance, trajectory curves (not straight), overshoot
+  near end (concentrated in t=0.85-0.98), deterministic
+  with seed.
+- 2 tests for `type_delay_ms` — flow dominates, never zero.
+- 2 tests for `hover_pause_ms` — in range, hesitating is
+  1-2s.
+- 1 test for `post_click_pause_ms` — distribution.
+- 2 tests for `idle_jitter` — small radius, infinite
+  generator.
+
+#### tests/integration/test_self_test.py
+
+- Bumped hardcoded `0.3.10` to `0.3.11` in
+  `test_all_modules_importable` and `test_cli_help_and_version`.
+
+Test count: 218 (was 195 in v0.3.10; +23 new tests).
+
 ## 0.3.10 (2026-06-24) — frame-accurate trim of leading blank frames
 
 Every recorded video started with 40-300ms of a blank white

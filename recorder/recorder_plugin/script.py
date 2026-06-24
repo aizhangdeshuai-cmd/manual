@@ -133,28 +133,29 @@ async def _handle_click(rec: Recorder, step: dict) -> tuple[bool, str, int]:
             sx, sy = cur.get("x", 0), cur.get("y", 0)
         except Exception:
             sx, sy = 0, 0
-        steps = random.randint(8, 18)
-        for i in range(1, steps + 1):
-            t = i / steps
-            # Ease-in-out cubic for a natural arc
-            e = t * t * (3 - 2 * t)
-            mx = sx + (cx - sx) * e + random.uniform(-2, 2)
-            my = sy + (cy - sy) * e + random.uniform(-2, 2)
+        # v0.3.11: use human_motion.glide_samples for a curve + overshoot.
+        from .human_motion import glide_samples, hover_pause_ms
+        for mx, my, delay_ms in glide_samples(sx, sy, cx, cy):
             await rec.page.mouse.move(mx, my)
-            await rec.page.wait_for_timeout(random.randint(8, 20))
-        # 3) Hover pause so the cursor sits on the target
-        await rec.page.wait_for_timeout(random.randint(120, 250))
+            await rec.page.wait_for_timeout(delay_ms)
+        # 3) Hover pause so the cursor sits on the target. v0.3.11:
+        #    ~1.5% of clicks have a "wait, I need to read this" 1-2s
+        #    pause; the rest are 120-250ms triangular. (Previously
+        #    uniform random.randint(120, 250), which felt mechanical.)
+        await rec.page.wait_for_timeout(
+            hover_pause_ms(120, 250, hesitating=random.random() < 0.015)
+        )
         # 4) Click
         await rec.page.mouse.click(cx, cy)
-        # 5) v0.3.9: post-click hover pause. A real user clicks
-        #    something, then pauses to look at the result before
-        #    moving on. 350-550ms feels like "read what just
-        #    changed" — short enough not to slow the video, long
-        #    enough that the click doesn't look like a teleport.
-        #    Combined with the v0.3.9 CSS-transition cursor, this
-        #    turns a robotic "click→next action" into a believable
-        #    "click→look→decide→next action".
-        await rec.page.wait_for_timeout(random.randint(350, 550))
+        # 5) v0.3.9 + v0.3.11: post-click "look at the result" pause.
+        #    v0.3.9 used random.randint(350, 550) — uniform, which
+        #    felt mechanical. v0.3.11 uses post_click_pause_ms:
+        #    mostly 200-400ms triangular ("read what just changed"),
+        #    ~5% are 1-2s ("the user is reading a modal, verifying
+        #    state, or thinking about the next step"). The longer
+        #    pauses are what read as "this is a person, not a script".
+        from .human_motion import post_click_pause_ms
+        await rec.page.wait_for_timeout(post_click_pause_ms())
         # Record position for next time
         try:
             await rec.page.evaluate(
@@ -203,11 +204,14 @@ async def _handle_type(rec: Recorder, step: dict) -> None:
                 )
         except Exception:
             pass
-        import random
+        # v0.3.11: type_delay_ms draws from a 3-mode mixture
+        # (75% flow 50-95ms, 20% burst 30-55ms, 5% hesitate 180-350ms).
+        # The old uniform 60-120ms had constant cadence which felt
+        # mechanical; the mixture produces the irregular "typing
+        # groove" of real human input.
+        from .human_motion import type_delay_ms
         for ch in text:
-            # 60-120ms per char (avg ~90ms) — looks like fast typing.
-            delay_ms = random.randint(60, 120)
-            await rec.page.keyboard.type(ch, delay=delay_ms)
+            await rec.page.keyboard.type(ch, delay=type_delay_ms())
     if step.get("press_enter"):
         await rec.page.keyboard.press("Enter")
 
@@ -274,14 +278,15 @@ async def _handle_move(rec: Recorder, step: dict) -> None:
         sx, sy = cur.get("x", 0), cur.get("y", 0)
     except Exception:
         sx, sy = 0, 0
-    per_step_ms = max(6, int(total / n))
-    for i in range(1, n + 1):
-        t = i / n
-        e = t * t * (3 - 2 * t)
-        mx = sx + (cx - sx) * e + random.uniform(-1.5, 1.5)
-        my = sy + (cy - sy) * e + random.uniform(-1.5, 1.5)
+    # v0.3.11: replace the linear ease-in-out glide with the bezier
+    # curve + overshoot from human_motion. Same surface API (n
+    # intermediate steps, per-step delay), but the trajectory now
+    # bows to one side and overshoots the target before snapping
+    # back, which is the "hand physics" of real cursor use.
+    from .human_motion import glide_samples, hover_pause_ms
+    for mx, my, delay_ms in glide_samples(sx, sy, cx, cy):
         await rec.page.mouse.move(mx, my)
-        await rec.page.wait_for_timeout(per_step_ms)
+        await rec.page.wait_for_timeout(delay_ms)
     # Optional: hover dwell at the destination
     dwell = step.get("dwell_ms", 0)
     if dwell:
