@@ -48,7 +48,7 @@ class HtmlOnDiskVersionTests(unittest.TestCase):
                 "<!-- user-manual-dashboard-version: 7 -->\n", encoding="utf-8"
             )
             rc = manual_helper.main(
-                ["manual_helper.py", "html-on-disk-version", str(p)]
+                ["manual_helper", "html-on-disk-version", str(p)]
             )
             self.assertEqual(rc, 0)
 
@@ -56,7 +56,7 @@ class HtmlOnDiskVersionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "nope.html"
             rc = manual_helper.main(
-                ["manual_helper.py", "html-on-disk-version", str(p)]
+                ["manual_helper", "html-on-disk-version", str(p)]
             )
             self.assertEqual(rc, 1)
 

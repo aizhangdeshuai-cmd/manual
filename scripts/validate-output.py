@@ -276,6 +276,170 @@ def _check_placeholder_alt(text: str) -> dict:
     }
 
 
+def _check_audience_leak(text: str) -> dict:
+    """v1.1.0: §2.7.1 audience-leak check. Business users should never
+    see content that reveals how the manual was generated (data source
+    comments, internal API tables, source file paths, repo directory
+    trees, or "video pending" placeholders). Each match is a
+    degradation of the end-user document and gets rejected.
+
+    Five patterns enforced (see SKILL.md §2.7.1 for examples):
+      1. `> 数据源:` 引用块 — meta-comment about provenance
+      2. 后端 API 路径表 — 4+ column tables where path column starts
+         with `/api/`, `/report/`, `/hr/`, etc.
+      3. 源码文件路径 — anything matching `report-admin-ui/src/...`,
+         `ehr-report/...`, `<stack>-<stack>/.../...Controller.java`,
+         or generic `<dir>/src/{views,components,types,utils}/...`
+      4. 仓库目录树 — bullet items with `ehr-report/`, `report-admin-ui/`,
+         `docs/user-manual/` as standalone paths
+      5. 录屏占位 — `<!-- video-pending:`, `⏳ **视频录屏待补**`,
+         `recorder-scripts/`, or `[VIDEO NEEDED]` / `[SCREENSHOT NEEDED]`
+
+    Code-fence skip: matches inside ``` fenced blocks are not flagged
+    (so LLM can still show positive/negative examples that quote the
+    forbidden text inside code blocks for instructional purposes).
+    """
+    import re
+    offenders: list[dict] = []
+
+    def is_in_code(s: str, pos: int) -> bool:
+        """Check whether byte position `pos` in s falls inside a
+        fenced code block (``` ... ```)."""
+        line_no = s.count("\n", 0, pos) + 1
+        lines = s.split("\n")
+        in_code = False
+        for i, line in enumerate(lines, 1):
+            if i == line_no:
+                return in_code
+            if line.lstrip().startswith("```"):
+                in_code = not in_code
+        return in_code
+
+    # Pattern 1: `> 数据源:` blockquote
+    pat1 = re.compile(r"^>\s*数据源[:：].*$", re.MULTILINE)
+    # Pattern 2: API endpoints (NOT routes, NOT images, NOT links).
+    # Business users should never see backend endpoint paths
+    # ANYWHERE in the manual — not in tables, not in bulleted lists,
+    # not in Q&A blocks. Allowed:
+    #   - User-facing routes: `/report/list`,
+    #     `/report/:companyId/designer/:code` (typed in browser bar)
+    #   - Image links: `../screenshots/sys/01.png` (no API verbs)
+    # Blocked:
+    #   - API endpoint segments: /report/config, /report/field,
+    #     /report/query, /report/export, /report/rollback, etc.
+    # Logic: match `/report/<verb>/...` or `/api/...` or `/hr/...`,
+    # but only when the path is inside backticks (rendered as code)
+    # AND does NOT end with an image extension.
+    pat2 = re.compile(
+        r"`[^`]*?(?:"
+        r"/report/(?:config|field|query|export|rollback|versions|enable|disable|upstream|gray)(?:/[^`]*?)?"
+        r"|/api/[\w/-]+"
+        r"|/hr/[\w/-]+"
+        r")[^`]*?`",
+    )
+    # Pattern 3: source file paths
+    pat3 = re.compile(
+        r"report-admin-ui/(src|dist)/[\w./-]+\.(vue|ts|tsx|js|jsx|scss|css)"
+        r"|ehr-report/[\w./-]+\.java"
+        r"|\b[a-z][\w-]+-ui/src/(views|components|types|utils)/[\w./-]+\.(vue|ts)"
+    )
+    # Pattern 4: repo directory references. Matches any list item
+    # or sentence that points the reader at code repositories or
+    # project roots. Two flavors:
+    #   (a) "- <text>: `ehr-report/`" / `report-admin-ui/` /
+    #       `docs/user-manual/` (subdirectory bullets)
+    #   (b) "(项目根 `ehr/`)" / "项目目录: `my-app/`" /
+    #       "repo root `xxx/`" (project root references)
+    #   (c) Inline backtick paths like `<word>/` preceded by repo
+    #       markers "项目根", "项目目录", "repo root", "代码仓库",
+    #       "代码根目录", "项目仓库" in any context (sentence, list
+    #       item, Q&A).
+    pat4 = re.compile(
+        r"(?:"
+        # (a) Subdirectory bullets: any list item mentioning a known
+        # subdirectory path.
+        r"^\s*(?:[-*]|\d+\.)\s+.*?(?:ehr-report|report-admin-ui|docs/user-manual)/\S*"
+        # (b) Project root: "项目根" / "项目目录" / "repo root" /
+        # "代码根目录" / "代码仓库" / "项目仓库" followed (within 30
+        # chars) by a backtick-quoted path ending in `/`.
+        r"|(?:项目\s*根|项目\s*目录|repo\s+root|代码\s*根目录|代码\s*仓库|项目\s*仓库)[^`]{0,40}`[\w.-]+/`"
+        # (c) Standalone "项目根: `xxx/`" or similar.
+        r"|(?:项目\s*根|项目\s*目录|repo\s+root)\s*[:：]\s*`[\w.-]+/`"
+        r")",
+        re.MULTILINE | re.IGNORECASE,
+    )
+    # Pattern 5: recording scaffolding
+    pat5 = re.compile(
+        r"<!--\s*video-pending"
+        r"|⏳\s*\*\*视频录屏待补"
+        r"|recorder-scripts/"
+        r"|\[VIDEO NEEDED\]"
+        r"|\[SCREENSHOT NEEDED\]"
+    )
+
+    # Pattern 6 (v1.1.2 §2.7.1 类 7): backend URLs / port numbers.
+    # User-facing frontend URLs (e.g. http://localhost:8088/) are
+    # allowed (users need them to open the app). Backend URLs on
+    # non-frontend ports (anything not 80/443/8080/8088) are blocked.
+    # We approximate by matching URLs with non-frontend ports.
+    pat6 = re.compile(
+        r"\bhttps?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\w[\w.-]*\.\w+)"
+        r":(?!80\b|443\b|8080\b|8088\b)\d{2,5}\b"
+    )
+
+    # Pattern 7 (v1.1.2 §2.7.1 类 7): tech-stack versions and
+    # architecture hints users don't need. Backtick-wrapped or
+    # bare mentions of common backend tech versions, plus
+    # "用同一套后端 API" / "前后端通信" / "SPA 单页应用" / "RESTful".
+    pat7 = re.compile(
+        r"(?:"
+        r"\b(?:Spring\s+Boot|SpringMVC|Node\.js|Express|Django|Flask|"
+        r"Vue\s*2|Vue\s*3|React|Angular|Element\s*UI|Element\s*Plus|"
+        r"PostgreSQL|MySQL|H2\s*in-memory|H2\s*数据库|"
+        r"Redis|Kafka|RabbitMQ|Docker|Kubernetes|"
+        r"maven|mvn|npm\s+run|npm\s+install|yarn|pnpm|spring-boot:run|gradle)"
+        r"\b[\s,，]*(?:\d+(?:\.\d+){0,2})?"
+        r"|"
+        r"(?:同一套|同一组|共\s*用)\s*后端\s*(?:API|接口|RESTful)"
+        r"|"
+        r"前后端\s*(?:用|通过|基于)\s*(?:RESTful|REST|HTTP|JSON|API)"
+        r"|"
+        r"(?:前端是|SPA\s*单页|单页应用)"
+        r")"
+    )
+
+    patterns = [
+        (pat1, "数据源 元注释 (SKILL §2.7.1 类 1)"),
+        (pat2, "后端 API 路径表 (SKILL §2.7.1 类 2)"),
+        (pat3, "源码文件路径 (SKILL §2.7.1 类 3)"),
+        (pat4, "仓库/目录结构列表 (SKILL §2.7.1 类 4)"),
+        (pat5, "录屏占位段 (SKILL §2.7.1 类 5)"),
+        (pat6, "后端 URL/端口 (SKILL §2.7.1 类 7)"),
+        (pat7, "技术栈版本/架构提示 (SKILL §2.7.1 类 7)"),
+    ]
+
+    for pat, reason in patterns:
+        for m in pat.finditer(text):
+            if is_in_code(text, m.start()):
+                continue
+            line = text[: m.start()].count("\n") + 1
+            offenders.append({
+                "match": m.group(0)[:120],
+                "reason": reason,
+                "line": line,
+            })
+
+    return {
+        "name": "audience_leak (v1.1.0 §2.7.1 业务用户文档禁列项)",
+        "hits": len(offenders),
+        "threshold": 0,
+        "comparison": "eq",
+        "ok": (len(offenders) == 0),
+        "flagged": len(offenders),
+        "offenders": offenders[:5],
+    }
+
+
 def _is_placeholder_png(path: Path) -> bool:
     """v0.3.2: a PNG file is a 'placeholder' if its dimensions are < 50x50.
     Real screenshots are 1280x800+; 1×1 or 32×32 etc. means the LLM
@@ -559,6 +723,20 @@ def validate_file(path):
         "offenders": tc_check["offenders"],
     })
     all_ok = all_ok and tc_check["ok"]
+    # v1.1.0: §2.7.1 audience-leak check. Reject any manual that
+    # contains "how it was generated" markers, internal API tables,
+    # source paths, repo trees, or recording-scaffolding placeholders.
+    leak_check = _check_audience_leak(text)
+    results.append({
+        "name": leak_check["name"],
+        "hits": leak_check["hits"],
+        "threshold": leak_check["threshold"],
+        "comparison": leak_check["comparison"],
+        "ok": leak_check["ok"],
+        "flagged": leak_check["flagged"],
+        "offenders": leak_check["offenders"],
+    })
+    all_ok = all_ok and leak_check["ok"]
     # v0.4.0: opt-in unique-content check. Pop a module-level flag
     # (set by main from --unique) so test harnesses can override.
     if globals().get("UNIQUE_CHECK_ENABLED"):

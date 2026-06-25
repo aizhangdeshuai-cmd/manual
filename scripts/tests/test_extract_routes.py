@@ -64,5 +64,51 @@ class ExtractRoutesTests(unittest.TestCase):
             self.assertEqual(by_path["/login"]["module"], "login")
 
 
+    def test_ruoyi_style_top_level_permissions(self):
+        """RuoYi puts permissions: [...] at route top-level, outside meta{}."""
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "router.js"
+            f.write_text(textwrap.dedent("""\
+                export const dynamicRoutes = [
+                  {
+                    path: '/system/user-auth',
+                    component: Layout,
+                    hidden: true,
+                    permissions: ['system:user:edit'],
+                    children: [
+                      { path: 'role/:userId(\\\\d+)', component: () => import('@/x') }
+                    ]
+                  },
+                  {
+                    path: '/admin',
+                    component: Layout,
+                    roles: ['admin', 'common']
+                  }
+                ]
+            """), encoding="utf-8")
+            r = subprocess.run([sys.executable, str(SCRIPT), str(f)], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, msg=r.stderr)
+            routes = json.loads(r.stdout)
+            user_auth = next(rt for rt in routes if rt["path"] == "/system/user-auth")
+            self.assertIn("system:user:edit", user_auth["perms"])
+            admin = next(rt for rt in routes if rt["path"] == "/admin")
+            self.assertIn("admin", admin["perms"])
+            self.assertIn("common", admin["perms"])
+
+    def test_icon_parsing(self):
+        """meta.icon: 'dashboard' is a common vue-element-admin pattern."""
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "router.ts"
+            f.write_text(textwrap.dedent("""\
+                export const routes = [
+                  { path: '/dashboard', component: () => import('@/d.vue'), meta: { title: '首页', icon: 'dashboard' } }
+                ]
+            """), encoding="utf-8")
+            r = subprocess.run([sys.executable, str(SCRIPT), str(f)], capture_output=True, text=True)
+            routes = json.loads(r.stdout)
+            self.assertEqual(routes[0]["icon"], "dashboard")
+            self.assertEqual(routes[0]["title"], "首页")
+
+
 if __name__ == "__main__":
     unittest.main()

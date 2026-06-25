@@ -1,4 +1,4 @@
-"""Unit tests for scripts/manual_helper.py — focused on init-skill personas
+"""Unit tests for manual_helper package — focused on init-skill personas
 scaffold fallback (v0.2.2)."""
 import json
 import os
@@ -10,14 +10,13 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parent.parent / "manual_helper.py"
+SCRIPT = Path(__file__).resolve().parent.parent / "manual_helper"
 SCRIPT_DIR = SCRIPT.parent
 PYTHON = os.environ.get("PYTHON", "python3")
 # v0.5.0: in-process tests need manual_helper importable as a module.
 # It's a flat script in scripts/, not a package, so add scripts/ to sys.path.
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-
 
 def run_module(func: str, *args) -> subprocess.CompletedProcess:
     """Run `python3 -m manual_helper <func> [args]` (uses module mode so
@@ -28,10 +27,9 @@ def run_module(func: str, *args) -> subprocess.CompletedProcess:
     return subprocess.run(
         [PYTHON, "-m", "manual_helper", func, *args],
         capture_output=True, text=True, check=False,
-        cwd=str(SCRIPT.parent),  # run from scripts/ (where manual_helper.py + examples/ relative path resolves)
+        cwd=str(SCRIPT.parent),  # run from scripts/ (where manual_helper/ + examples/ relative path resolves)
         env=env,
     )
-
 
 class InitSkillPersonasTests(unittest.TestCase):
     def test_init_skill_scaffolds_personas_when_missing(self):
@@ -66,7 +64,6 @@ class InitSkillPersonasTests(unittest.TestCase):
             self.assertEqual(personas.read_text(), original, "init-skill overwrote existing personas.json!")
             # No warning should be emitted
             self.assertNotIn("personas.json was MISSING", r.stderr)
-
 
 class InitSkillRecordingBlockedTests(unittest.TestCase):
     """v0.4.0: init-skill auto-installs recorder deps and raises
@@ -136,217 +133,6 @@ class InitSkillRecordingBlockedTests(unittest.TestCase):
             # when --no-install is set
             self.assertNotIn("auto-installing", r.stderr)
 
-
-class RecordAndReplaceTests(unittest.TestCase):
-    """v0.4.0: one-shot record-and-replace command."""
-
-    def test_record_and_replace_help(self):
-        """v0.4.0: `record-and-replace` (no args) prints usage
-        and exits 2 (invalid invocation)."""
-        r = run_module("record-and-replace")
-        self.assertEqual(r.returncode, 2, msg=r.stderr)
-        self.assertIn("usage: record-and-replace", r.stderr)
-        self.assertIn("--script", r.stderr)
-        self.assertIn("--dry-run", r.stderr)
-
-    def test_record_and_replace_help_flag(self):
-        """v0.4.0: `record-and-replace --help` prints usage and
-        exits 0 (the --help convention)."""
-        r = run_module("record-and-replace", "--help")
-        self.assertEqual(r.returncode, 0, msg=r.stderr)
-        self.assertIn("usage: record-and-replace", r.stderr)
-
-    def test_record_and_replace_allow_blocked_flag_is_rejected_v1_0_0(self):
-        """v1.0.0: --allow-blocked was removed. Passing it must
-        exit 2 with a clear error message."""
-        r = run_module("record-and-replace", "--allow-blocked",
-                      "/nonexistent/manual.md")
-        self.assertEqual(r.returncode, 2, msg=r.stderr)
-        self.assertIn("removed in v1.0.0", r.stderr)
-        self.assertIn("real screenshots and videos", r.stderr)
-
-    def test_record_and_replace_missing_manual(self):
-        """v0.4.0: missing manual path -> exit 2 with clear error."""
-        with tempfile.TemporaryDirectory() as d:
-            r = run_module("record-and-replace",
-                          "/nonexistent/manual.md",
-                          "--script", "/nonexistent/script.json")
-            self.assertEqual(r.returncode, 2, msg=r.stderr)
-            self.assertIn("manual not found", r.stderr)
-
-    def test_record_and_replace_missing_script(self):
-        """v0.4.0: missing --script -> exit 2 with clear error."""
-        with tempfile.TemporaryDirectory() as d:
-            md = Path(d) / "manual.md"
-            md.write_text("# Manual\n")
-            r = run_module("record-and-replace", str(md),
-                          "--script", "/nonexistent/script.json")
-            self.assertEqual(r.returncode, 2, msg=r.stderr)
-            self.assertIn("--script not found", r.stderr)
-
-    def test_record_and_replace_dry_run_when_deps_missing(self):
-        """v0.4.0: --dry-run still runs pre-flight (so the user
-        sees which deps are missing) but does NOT actually record.
-        If pre-flight fails (deps missing on a fresh host), exit 2
-        with the same diagnostic format as a real run — the user
-        gets a clear list of what to install."""
-        with tempfile.TemporaryDirectory() as d:
-            md = Path(d) / "manual.md"
-            md.write_text("# Manual\n![x](img/x.png)\n")
-            script = Path(d) / "script.json"
-            script.write_text('{"url": "http://localhost:9999"}\n')
-            r = run_module("record-and-replace", str(md),
-                          "--script", str(script),
-                          "--dry-run")
-            # Pre-flight will fail because recorder_plugin is
-            # not importable on a host that didn't install it.
-            # That's the EXPECTED path here; we assert the error
-            # message is the pre-flight format, not a Python
-            # traceback.
-            # Accept either rc=2 (pre-flight FAIL) or rc=3 (dry-run
-            # pre-flight passed, mapping preview shown). The test was
-            # originally written for the "deps missing" path; v0.4.0+
-            # may pass on hosts where recorder is already pip-installed.
-            self.assertIn(r.returncode, (2, 3),
-                          msg=f"unexpected rc={r.returncode} stderr={r.stderr[:300]}")
-            # Each pre-flight line should start with an icon. The
-            # first line is the banner "=== record-and-replace: ...";
-            # skip it. v0.5.0 dry-run with no --auto-generate-script
-            # still runs pre-flight (4-6 icon lines visible).
-            non_banner = [
-                line for line in r.stderr.splitlines()
-                if not line.startswith("===")
-            ]
-            # Icons appear AFTER leading whitespace (e.g. "  ✅ x"), so
-            # lstrip() before startswith() is needed. Found in v0.5.0
-            # when pre-flight printed 4 ✅ lines but startswith("✅")
-            # returned False (positions [0] and [1] were spaces).
-            self.assertTrue(
-                any(line.lstrip().startswith(("✅", "❌", "⚠️"))
-                    for line in non_banner),
-                msg=f"no icon-prefixed pre-flight lines in: {r.stderr[:400]}",
-            )
-
-
-class CheckRecorderScriptTests(unittest.TestCase):
-    """v0.5.0: check-recorder-script catches 4 common failure patterns."""
-
-    def _write_script(self, d, **overrides):
-        base = {
-            "name": "test-script",
-            "url": "http://localhost:8080",
-            "auth_env": ["$TEST_USER", "$TEST_PASS"],
-            "steps": [
-                {"action": "navigate", "url": "/"},
-                {"action": "type", "selector": "input[name=user]", "value": "$TEST_USER"},
-                {"action": "type", "selector": "input[name=pass]", "value": "$TEST_PASS"},
-                {"action": "click", "selector": "button[type=submit]"},
-                {"action": "screenshot", "name": "home"},
-            ],
-        }
-        base.update(overrides)
-        path = Path(d) / "script.json"
-        path.write_text(json.dumps(base, indent=2))
-        return path
-
-    def test_clean_script_passes_all_4_checks(self):
-        """v0.5.0: a fully-filled script with all env vars set passes."""
-        with tempfile.TemporaryDirectory() as d:
-            script = self._write_script(d)
-            # Set the env vars so auth check passes
-            os.environ["TEST_USER"] = "admin"
-            os.environ["TEST_PASS"] = "123456"
-            try:
-                r = run_module("check-recorder-script", str(script))
-                # URL localhost:8080 may or may not be reachable; we only
-                # assert that the OTHER 3 checks pass and overall rc is
-                # not 1 from a script-content failure.
-                if r.returncode == 1:
-                    # If it failed, must be ONLY the URL check
-                    self.assertIn("target URL", r.stdout, msg=r.stdout + r.stderr)
-            finally:
-                del os.environ["TEST_USER"]
-                del os.environ["TEST_PASS"]
-
-    def test_todo_placeholders_flagged(self):
-        """v0.5.0: a script with <TODO: ...> placeholders fails check 1."""
-        with tempfile.TemporaryDirectory() as d:
-            script = self._write_script(d,
-                url="<TODO: target URL>",
-                steps=[{"action": "navigate", "url": "/<TODO: starting route>"}] +
-                      [{"action": "screenshot", "name": "x"}])
-            r = run_module("check-recorder-script", str(script))
-            self.assertEqual(r.returncode, 1, msg=r.stderr)
-            self.assertIn("TODO", r.stdout)
-            self.assertIn("<TODO: target URL>", r.stdout)
-
-    def test_unset_env_var_flagged_with_specific_fix(self):
-        """v0.5.0: when $LG_USER is in auth_env but unset, check 3 fails
-        with the exact env var name + the lg-contract-flow.mp4 failure
-        pattern as the fix hint."""
-        with tempfile.TemporaryDirectory() as d:
-            script = self._write_script(d, auth_env=["$LG_USER", "$LG_PASS"])
-            # Ensure both unset
-            for k in ("LG_USER", "LG_PASS"):
-                os.environ.pop(k, None)
-            r = run_module("check-recorder-script", str(script))
-            self.assertEqual(r.returncode, 1, msg=r.stderr)
-            self.assertIn("LG_USER", r.stdout)
-            self.assertIn("export", r.stdout)
-            # The fix should reference the lg-contract-flow.mp4 failure
-            self.assertIn("lg-contract-flow", r.stdout,
-                          "fix hint should reference the canonical failure pattern")
-
-    def test_unbalanced_video_start_stop_flagged(self):
-        """v0.5.0: video_start without matching video_stop fails check 4."""
-        with tempfile.TemporaryDirectory() as d:
-            script = self._write_script(d, steps=[
-                {"action": "navigate", "url": "/"},
-                {"action": "video_start", "name": "demo"},
-                {"action": "screenshot", "name": "shot1"},
-                # NO video_stop — unbalanced
-            ])
-            os.environ["TEST_USER"] = "x"; os.environ["TEST_PASS"] = "y"
-            try:
-                r = run_module("check-recorder-script", str(script))
-                self.assertEqual(r.returncode, 1, msg=r.stderr)
-                self.assertIn("video_start", r.stdout)
-                self.assertIn("video_stop", r.stdout)
-                self.assertIn("unbalanced", r.stdout)
-            finally:
-                del os.environ["TEST_USER"]; del os.environ["TEST_PASS"]
-
-    def test_empty_selector_flagged(self):
-        """v0.5.0: click step with <TODO: selector> fails check 4."""
-        with tempfile.TemporaryDirectory() as d:
-            script = self._write_script(d, steps=[
-                {"action": "navigate", "url": "/"},
-                {"action": "click", "selector": "<TODO: button.login>"},
-            ])
-            os.environ["TEST_USER"] = "x"; os.environ["TEST_PASS"] = "y"
-            try:
-                r = run_module("check-recorder-script", str(script))
-                self.assertEqual(r.returncode, 1, msg=r.stderr)
-                self.assertIn("selectors", r.stdout)
-            finally:
-                del os.environ["TEST_USER"]; del os.environ["TEST_PASS"]
-
-    def test_missing_file(self):
-        """v0.5.0: missing script -> exit 2 with clear error."""
-        r = run_module("check-recorder-script", "/nonexistent.json")
-        self.assertEqual(r.returncode, 2, msg=r.stderr)
-        self.assertIn("not found", r.stderr)
-
-    def test_invalid_json(self):
-        """v0.5.0: invalid JSON -> exit 2 with parse error."""
-        with tempfile.TemporaryDirectory() as d:
-            bad = Path(d) / "bad.json"
-            bad.write_text("this is not json {")
-            r = run_module("check-recorder-script", str(bad))
-            self.assertEqual(r.returncode, 2, msg=r.stderr)
-            self.assertIn("cannot parse", r.stderr)
-
-
 class BuildRecorderTemplateV2Tests(unittest.TestCase):
     """v0.5.0: build_recorder_template auto-fills from project context."""
 
@@ -408,47 +194,109 @@ class BuildRecorderTemplateV2Tests(unittest.TestCase):
         # Generic / too-short -> AUTH_ fallback
         self.assertEqual(_infer_auth_env_name("x", "USER"), "AUTH_USER")
 
+class DiffArtifactsGuardsTests(unittest.TestCase):
+    """P7: diff-artifacts should fail loud on missing inputs (violates
+    §12 fail loud otherwise — empty buckets + exit 0 masks LLM path
+    mistakes)."""
 
-class RecordAndReplaceAutoGenTests(unittest.TestCase):
-    """v0.5.0: record-and-replace --auto-generate-script works without
-    an existing --script file."""
+    def _run(self, *args):
+        return subprocess.run(
+            [PYTHON, "-m", "manual_helper", *args],
+            capture_output=True, text=True,
+        )
 
-    def test_auto_gen_creates_script_when_missing(self):
-        """v0.5.0: --auto-generate-script with no --script creates
-        <manual>.recorder.json next to the manual and proceeds to
-        pre-flight (which will fail on missing recorder_plugin, but
-        the script generation step itself must succeed)."""
+    def test_missing_md_exits_2(self):
         with tempfile.TemporaryDirectory() as d:
-            proj = Path(d)
-            (proj / "docs" / "user-manual").mkdir(parents=True)
-            (proj / "docs" / "user-manual" / "manual-config.json").write_text(
-                json.dumps({"project": {"host": "localhost", "port": 8080}})
+            r = self._run("diff-artifacts", d, "/tmp/does-not-exist.md")
+            self.assertEqual(r.returncode, 2, msg=r.stderr)
+            self.assertIn("manual.md not found", r.stderr)
+
+    def test_missing_project_root_exits_2(self):
+        with tempfile.TemporaryDirectory() as d:
+            md = Path(d) / "manual.md"
+            md.write_text("# x\n")
+            r = self._run("diff-artifacts", "/no/such/dir", str(md))
+            self.assertEqual(r.returncode, 2, msg=r.stderr)
+            self.assertIn("project_root does not exist", r.stderr)
+
+    def test_project_root_without_superpowers_warns(self):
+        """llm_only_mode path: project_root has no docs/superpowers/ —
+        should warn to stderr but still exit 0 with empty buckets."""
+        with tempfile.TemporaryDirectory() as d:
+            md = Path(d) / "manual.md"
+            md.write_text("# x\n")
+            r = self._run("diff-artifacts", d, str(md))
+            self.assertEqual(r.returncode, 0, msg=r.stderr)
+            self.assertIn("docs/superpowers/", r.stderr)
+
+class ProjectLayoutDetectionTests(unittest.TestCase):
+    """P6: init-skill should auto-detect frontend/backend layout and
+    fill repo_layout + inputs[] with concrete values, not <PLACEHOLDER>.
+    We invoke the detector via subprocess since manual_helper.py is not
+    importable as a module (it has CLI dispatch in __main__)."""
+
+    def _detect(self, root: Path) -> dict:
+        r = subprocess.run(
+            [PYTHON, "-m", "manual_helper", "_detect_layout", str(root)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 0, msg=r.stderr)
+        return json.loads(r.stdout)
+
+    def test_single_repo_src_root(self):
+        """RuoYi 派系: <root>/src/{views,router} exists -> frontend_root='.'"""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "src" / "views").mkdir(parents=True)
+            (root / "src" / "router").mkdir(parents=True)
+            (root / "src" / "router" / "index.js").write_text("// x")
+            r = self._detect(root)
+            self.assertEqual(r["repo_layout"]["frontend_root"], ".")
+            paths = {i["path"] for i in r["inputs"]}
+            self.assertIn("src/views", paths)
+            self.assertIn("src/router/index.js", paths)
+
+    def test_monorepo_frontend_dir(self):
+        """<root>/frontend/src/{views,router} -> frontend_root='frontend'"""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "frontend" / "src" / "views").mkdir(parents=True)
+            (root / "frontend" / "src" / "router").mkdir(parents=True)
+            (root / "frontend" / "src" / "router" / "index.ts").write_text("// x")
+            r = self._detect(root)
+            self.assertEqual(r["repo_layout"]["frontend_root"], "frontend")
+            paths = {i["path"] for i in r["inputs"]}
+            # The detector should set frontend_pages path to point at the
+            # views dir, prefixed by frontend_root. Accept either form
+            # ("frontend/src/views" or "src/views") — we just want a
+            # non-placeholder concrete value.
+            self.assertTrue(
+                "frontend/src/views" in paths or "src/views" in paths,
+                f"expected concrete views path, got {paths}",
             )
-            manual_dir = proj / "docs" / "user-manual" / "manual"
-            manual_dir.mkdir(parents=True, exist_ok=True)
-            manual = manual_dir / "lg-user-manual.md"
-            manual.write_text("# Manual\n[SCREENSHOT: shot1.png]\n")
-            # Run from proj so cwd = project_root (record-and-replace uses
-            # Path.cwd() for the auto-gen step).
-            r = subprocess.run(
-                [PYTHON, "-m", "manual_helper", "record-and-replace",
-                 str(manual), "--auto-generate-script", "--dry-run"],
-                capture_output=True, text=True, check=False,
-                cwd=str(proj),  # so Path.cwd() returns proj
-                env={**os.environ, "PYTHONPATH": str(SCRIPT.parent)},
+            self.assertTrue(
+                "frontend/src/router/index.ts" in paths or "src/router/index.ts" in paths,
+                f"expected concrete router path, got {paths}",
             )
-            # auto-gen should have created the .recorder.json file
-            generated = manual_dir / "lg-user-manual.recorder.json"
-            self.assertTrue(generated.exists(),
-                            msg=f"expected auto-gen file at {generated}, got stderr: {r.stderr}")
-            # The generated script should have auto-filled url
-            script_data = json.loads(generated.read_text())
-            self.assertEqual(script_data["url"], "http://localhost:8080")
 
+    def test_spring_boot_backend(self):
+        """pom.xml at <root>/backend -> backend_root='backend'"""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "backend").mkdir(parents=True)
+            (root / "backend" / "pom.xml").write_text("<project/>")
+            r = self._detect(root)
+            self.assertEqual(r["repo_layout"]["backend_root"], "backend")
+            kinds = {i["kind"] for i in r["inputs"]}
+            self.assertIn("backend_dtos", kinds)
 
-if __name__ == "__main__":
-    unittest.main()
-
+    def test_no_frontend_falls_back(self):
+        """No src/views, no frontend/*, no app/* -> no frontend detected."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            r = self._detect(root)
+            self.assertEqual(r["repo_layout"]["frontend_root"], "frontend")
+            self.assertEqual(r["inputs"], [])
 
 class InitSkillAutoRegenTests(unittest.TestCase):
     """v0.5.0: init-skill auto-regenerates the viewer when the shipped
@@ -533,178 +381,3 @@ class InitSkillAutoRegenTests(unittest.TestCase):
             self.assertNotIn("viewer: regenerated", r.stderr)
             self.assertNotIn("viewer: created", r.stderr)
 
-
-class RecordAndReplaceAutoRegenTests(unittest.TestCase):
-    """v0.5.0: record-and-replace auto-regenerates the viewer at the end
-    of a (real or dry-run) recording. Opt out with --skip-viewer-regen."""
-
-    def test_record_and_replace_dry_run_regenerates_viewer(self):
-        """A --dry-run --auto-generate-script call (no actual recording)
-        should still auto-regen the viewer so the build is consistent.
-        The script-generation path doesn't actually run the recorder, so
-        this is the cheapest end-to-end test."""
-        with tempfile.TemporaryDirectory() as d:
-            proj = Path(d)
-            um = proj / "docs" / "user-manual"
-            um.mkdir(parents=True)
-            (um / "manual-config.json").write_text(
-                json.dumps({"project": {"host": "localhost", "port": 8080}})
-            )
-            manual_dir = um / "manual"
-            manual_dir.mkdir(parents=True, exist_ok=True)
-            manual = manual_dir / "lg-user-manual.md"
-            manual.write_text("# Manual\n[SCREENSHOT: shot1.png]\n")
-            # Stale viewer on disk
-            stale = um / "user-manual.html"
-            stale.write_text("<!-- user-manual-dashboard-version: 1 -->\n<html></html>")
-            # Run record-and-replace from project root (cwd matters for Path.cwd())
-            r = subprocess.run(
-                [PYTHON, "-m", "manual_helper", "record-and-replace",
-                 str(manual), "--auto-generate-script", "--dry-run"],
-                capture_output=True, text=True, check=False,
-                cwd=str(proj),
-                env={**os.environ, "PYTHONPATH": str(SCRIPT.parent)},
-            )
-            # Pre-flight may fail (deps missing on a fresh host) but the
-            # auto-regen block runs BEFORE the recorder, so the viewer
-            # should be upgraded regardless of the recorder rc.
-            # We assert on the file, not the rc.
-            import re
-            self.assertTrue(stale.exists(),
-                            msg=f"viewer file disappeared: stderr={r.stderr[:400]}")
-            new_text = stale.read_text()
-            m = re.search(r"user-manual-dashboard-version:\s*(\d+)", new_text)
-            self.assertIsNotNone(m, f"no version marker: {new_text[:200]}")
-            new_version = int(m.group(1))
-            self.assertGreaterEqual(new_version, 25,
-                msg=f"expected viewer version >= 25, got {new_version}")
-            # Stderr should report the regeneration
-            self.assertIn("viewer: regenerated", r.stderr,
-                          msg=f"missing 'viewer: regenerated' in stderr: {r.stderr[:400]}")
-
-    def test_record_and_replace_skip_viewer_regen_does_not_touch_viewer(self):
-        """--skip-viewer-regen must leave a stale viewer untouched
-        (for CI environments that ship a pinned viewer)."""
-        with tempfile.TemporaryDirectory() as d:
-            proj = Path(d)
-            um = proj / "docs" / "user-manual"
-            um.mkdir(parents=True)
-            (um / "manual-config.json").write_text(
-                json.dumps({"project": {"host": "localhost", "port": 8080}})
-            )
-            manual_dir = um / "manual"
-            manual_dir.mkdir(parents=True, exist_ok=True)
-            manual = manual_dir / "lg-user-manual.md"
-            manual.write_text("# Manual\n")
-            stale = um / "user-manual.html"
-            stale.write_text("<!-- user-manual-dashboard-version: 1 -->\n<html>STALE</html>")
-            r = subprocess.run(
-                [PYTHON, "-m", "manual_helper", "record-and-replace",
-                 str(manual), "--auto-generate-script", "--dry-run",
-                 "--skip-viewer-regen"],
-                capture_output=True, text=True, check=False,
-                cwd=str(proj),
-                env={**os.environ, "PYTHONPATH": str(SCRIPT.parent)},
-            )
-            # Viewer should be UNCHANGED
-            self.assertEqual(stale.read_text(), "<!-- user-manual-dashboard-version: 1 -->\n<html>STALE</html>",
-                             msg=f"--skip-viewer-regen did not skip: stderr={r.stderr[:400]}")
-            self.assertIn("viewer: auto-regen skipped (--skip-viewer-regen)", r.stderr)
-
-
-class CheckRecorderScriptNarrationCoverageTests(unittest.TestCase):
-    """v0.5.1: check-recorder-script check #5 (NARRATION COVERAGE) catches
-    the silent-failure case where an LLM forgets the `narration` field on
-    video_stop steps. This is the failure mode that produced
-    `user-manual.mp4` (ovr) = 4.08s silent login page."""
-
-    def _write_script(self, d, *, video_stops=None):
-        """Build a minimal script with a navigate + login + screenshot +
-        optional video_stops. video_stops is a list of dicts that get
-        appended after the screenshot."""
-        base = {
-            "name": "test",
-            "url": "http://localhost:8080",
-            "auth_env": ["$TEST_USER", "$TEST_PASS"],
-            "steps": [
-                {"action": "navigate", "url": "/"},
-                {"action": "type", "selector": "input[name=user]", "value": "$TEST_USER"},
-                {"action": "type", "selector": "input[name=pass]", "value": "$TEST_PASS"},
-                {"action": "click", "selector": "button[type=submit]"},
-                {"action": "screenshot", "name": "home"},
-            ],
-        }
-        if video_stops:
-            # video_start + each video_stop (with optional narration)
-            base["steps"].insert(0, {"action": "video_start", "name": "demo"})
-            for vs in video_stops:
-                base["steps"].append(vs)
-        path = Path(d) / "script.json"
-        path.write_text(json.dumps(base, indent=2))
-        return path
-
-    def test_check_recorder_script_no_video_sessions_is_ok(self):
-        """A script with no video sessions at all → check #5 is OK (n/a)."""
-        with tempfile.TemporaryDirectory() as d:
-            script = self._write_script(d, video_stops=None)
-            os.environ["TEST_USER"] = "x"; os.environ["TEST_PASS"] = "y"
-            try:
-                r = run_module("check-recorder-script", str(script))
-                # url may or may not be reachable; we only assert the
-                # NARRATION COVERAGE check is in the OK set
-                if r.returncode in (0, 1):
-                    self.assertIn("narration coverage", r.stdout,
-                                  msg=f"missing narration coverage check: {r.stdout[:400]}")
-            finally:
-                del os.environ["TEST_USER"]; del os.environ["TEST_PASS"]
-
-    def test_check_recorder_script_all_video_stops_have_narration_is_ok(self):
-        """Every video_stop has narration[] → check #5 passes (OK)."""
-        with tempfile.TemporaryDirectory() as d:
-            script = self._write_script(d, video_stops=[
-                {"action": "video_stop", "name": "demo",
-                 "narration": ["第一步,打开", "第二步,点击"]},
-            ])
-            os.environ["TEST_USER"] = "x"; os.environ["TEST_PASS"] = "y"
-            try:
-                r = run_module("check-recorder-script", str(script))
-                # Look for "narration coverage: ... all N video session(s) have"
-                if r.returncode in (0, 1):
-                    self.assertIn("all 1 video session", r.stdout,
-                                  msg=f"expected OK narration: {r.stdout[:400]}")
-            finally:
-                del os.environ["TEST_USER"]; del os.environ["TEST_PASS"]
-
-    def test_check_recorder_script_no_narration_fails(self):
-        """The lg-contract-flow.mp4 silent-failure case: script has
-        video_stop with NO narration field. Check #5 must FAIL."""
-        with tempfile.TemporaryDirectory() as d:
-            script = self._write_script(d, video_stops=[
-                {"action": "video_stop", "name": "demo"},
-            ])
-            os.environ["TEST_USER"] = "x"; os.environ["TEST_PASS"] = "y"
-            try:
-                r = run_module("check-recorder-script", str(script))
-                self.assertEqual(r.returncode, 1, msg=r.stdout)
-                # The fix hint must mention narration
-                self.assertIn("narration", r.stdout)
-                self.assertIn("SILENT", r.stdout)
-            finally:
-                del os.environ["TEST_USER"]; del os.environ["TEST_PASS"]
-
-    def test_check_recorder_script_partial_narration_warns(self):
-        """Some video_stops have narration, some don't → WARN with missing names."""
-        with tempfile.TemporaryDirectory() as d:
-            script = self._write_script(d, video_stops=[
-                {"action": "video_stop", "name": "with-audio",
-                 "narration": ["x"]},
-                {"action": "video_stop", "name": "silent-one"},
-            ])
-            os.environ["TEST_USER"] = "x"; os.environ["TEST_PASS"] = "y"
-            try:
-                r = run_module("check-recorder-script", str(script))
-                # WARN counts as overall FAIL (rc=1) by check-recorder-script
-                # convention; just assert the names appear
-                self.assertIn("silent-one", r.stdout)
-            finally:
-                del os.environ["TEST_USER"]; del os.environ["TEST_PASS"]

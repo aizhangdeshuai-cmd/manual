@@ -25,12 +25,12 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 import manual_helper
 
 PYTHON = os.environ.get("PYTHON", "python3")
-SCRIPT = SCRIPTS_DIR / "manual_helper.py"
+SCRIPT = SCRIPTS_DIR / "manual_helper"
 
 
 def run_cli(*args):
     return subprocess.run(
-        [PYTHON, str(SCRIPT), *args],
+        [PYTHON, "-m", "manual_helper", *args],
         capture_output=True, text=True,
     )
 
@@ -214,7 +214,7 @@ class RecordingReadinessTests(unittest.TestCase):
         fresh = self.root / "fresh"
         fresh.mkdir()
         result = subprocess.run(
-            [PYTHON, str(SCRIPT), "init-skill", str(fresh)],
+            [PYTHON, "-m", "manual_helper", "init-skill", str(fresh)],
             capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)

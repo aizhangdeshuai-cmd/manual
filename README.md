@@ -33,7 +33,7 @@ user-manual/
 │   ├── extract-routes.py       # 前端路由(Vue Router 4)
 │   ├── extract-roles.py        # RBAC 角色权限(@PreAuthorize / v-permission)
 │   ├── extract-openapi.py      # OpenAPI 3.x 元数据(fallback)
-│   ├── manual_helper.py        # orchestrator,15 个子命令(SKILL.md §7)
+│   ├── manual_helper/         # orchestrator package (v2.0.0 split), 15 个子命令(SKILL.md §7)
 │   ├── validate-output.py      # 6 项必跑校验,失败阻断 commit
 │   ├── tests/                  # 33 个 stdlib unittest,无外部依赖
 ├── templates/

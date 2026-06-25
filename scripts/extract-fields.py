@@ -52,6 +52,14 @@ import sys
 from pathlib import Path
 
 
+# v-model binding prefixes that mark a field as belonging to a specific
+# form context. v-model="form.X" -> form; v-model="queryParams.X" -> query.
+# RuoYi / vue-element-admin conventions; generic.
+FORM_PREFIXES = {"form", "modelForm", "dataForm", "addForm", "updateForm", "editForm"}
+QUERY_PREFIXES = {"queryParams", "query", "searchParams", "searchForm", "filter"}
+
+
+
 # ---------- Vue mode ----------
 
 # Match <el-form-item prop="X" label="Y" ...> or with rules required
@@ -68,6 +76,23 @@ NAIVE_FORM_ITEM_RE = re.compile(
     r'<n-form-item[^>]*?path="(?P<name>[^"]+)"[^>]*?label="(?P<label>[^"]+)"',
     re.IGNORECASE,
 )
+# Table column: <el-table-column prop="X" label="Y">. Captures the column
+# name (prop) and human label. RuoYi派系 and Element Plus convention.
+EL_TABLE_COLUMN_RE = re.compile(
+    r'<el-table-column[^>]*?prop="(?P<name>[^"]+)"[^>]*?label="(?P<label>[^"]+)"',
+    re.IGNORECASE,
+)
+# el-table-column with label-first attribute order (Element Plus allows either)
+EL_TABLE_COLUMN_LABEL_FIRST_RE = re.compile(
+    r'<el-table-column[^>]*?label="(?P<label>[^"]+)"[^>]*?prop="(?P<name>[^"]+)"',
+    re.IGNORECASE,
+)
+# el-form :model="X" -> detect which form is in scope
+EL_FORM_MODEL_RE = re.compile(
+    r'<el-form[^>]*?:model="(?P<model>\w+)"',
+    re.IGNORECASE,
+)
+
 # Required heuristic: "required: true" in rules object OR has * after label
 RULES_REQUIRED_RE = re.compile(
     r'rules:\s*\{[^}]*?(?P<name>\w+)\s*:\s*\[[^\]]*?\{[^{}]*?required\s*:\s*true',
@@ -91,63 +116,117 @@ def _infer_type(label: str) -> str:
     return "输入框"
 
 
+def _classify_vmodel(expr: str) -> tuple[str, str]:
+    """Given a v-model expression like "form.userName" or "queryParams.x.y",
+    return (context, field_name) where context is "form" | "query" | "other".
+    Field name is the last segment.
+    """
+    parts = expr.split(".")
+    if len(parts) < 2:
+        return ("other", parts[0] if parts else expr)
+    root = parts[0]
+    if root in FORM_PREFIXES:
+        return ("form", parts[-1])
+    if root in QUERY_PREFIXES:
+        return ("query", parts[-1])
+    return ("other", parts[-1])
+
+
 def extract_from_vue(path: Path) -> list[dict]:
     text = path.read_text(encoding="utf-8", errors="replace")
 
-    fields: dict[str, dict] = {}
+    # P4: figure out which form context a <el-form :model="X"> is in.
+    # The v-model binding prefix tells us if a field belongs to "form" or
+    # "query". For form-items (prop="X" + label="Y"), we infer context
+    # from the nearest preceding <el-form :model="..."> by scanning the
+    # text from the form-item's match start backwards to the most recent
+    # form-model.
+    # Detect all el-form :model locations: list of (offset, model_name).
+    form_model_offsets: list[tuple[int, str]] = []
+    for fm in EL_FORM_MODEL_RE.finditer(text):
+        form_model_offsets.append((fm.start(), fm.group("model")))
 
-    for m in EL_FORM_ITEM_RE.finditer(text) or EL_FORM_ITEM_LABEL_ONLY_RE.finditer(text):
-        name = m.group("name")
-        label = m.group("label")
-        if name not in fields:
-            fields[name] = {
+    def _context_for(offset: int) -> str:
+        """Given an offset in text, return 'query' | 'form' | 'other'
+        based on the most recent <el-form :model="...">."""
+        ctx = "other"
+        for off, model in form_model_offsets:
+            if off > offset:
+                break
+            if model in QUERY_PREFIXES:
+                ctx = "query"
+            elif model in FORM_PREFIXES:
+                ctx = "form"
+        return ctx
+
+    fields: dict[tuple[str, str], dict] = {}  # (context, name) -> entry
+
+    def _add(name: str, label: str, context: str, placeholder_pm=None) -> None:
+        key = (context, name)
+        if key not in fields:
+            fields[key] = {
                 "name": name,
                 "label": label,
                 "type": _infer_type(label),
                 "required": False,
                 "placeholder": None,
+                "context": context,
                 "source": str(path),
             }
-        # placeholder (best effort from nearby)
-        start = m.end()
-        nearby = text[start:start + 200]
-        pm = PLACEHOLDER_RE.search(nearby)
-        if pm:
-            fields[name]["placeholder"] = pm.group("ph")
+        if placeholder_pm:
+            fields[key]["placeholder"] = placeholder_pm.group("ph")
 
+    # Form items: <el-form-item prop="X" label="Y">
+    for m in EL_FORM_ITEM_RE.finditer(text):
+        name = m.group("name")
+        label = m.group("label")
+        ctx = _context_for(m.start())
+        start = m.end()
+        pm = PLACEHOLDER_RE.search(text[start:start + 200])
+        _add(name, label, ctx, pm)
+
+    for m in EL_FORM_ITEM_LABEL_ONLY_RE.finditer(text):
+        name = m.group("name")
+        label = m.group("label")
+        ctx = _context_for(m.start())
+        start = m.end()
+        pm = PLACEHOLDER_RE.search(text[start:start + 200])
+        _add(name, label, ctx, pm)
+
+    # naive-ui form items
     for m in NAIVE_FORM_ITEM_RE.finditer(text):
         name = m.group("name")
         label = m.group("label")
-        if name not in fields:
-            fields[name] = {
-                "name": name,
-                "label": label,
-                "type": _infer_type(label),
-                "required": False,
-                "placeholder": None,
-                "source": str(path),
-            }
+        ctx = _context_for(m.start())
+        _add(name, label, ctx)
 
+    # v-model bindings: infer context from prefix
     for m in V_MODEL_RE.finditer(text):
         expr = m.group("expr")
-        # form.X  -> X
-        parts = expr.split(".")
-        if len(parts) >= 2 and parts[0] in ("form", "modelForm", "dataForm"):
-            name = parts[-1]
-            if name not in fields:
-                fields[name] = {
-                    "name": name,
-                    "label": name,
-                    "type": "输入框",
-                    "required": False,
-                    "placeholder": None,
-                    "source": str(path),
-                }
+        ctx, name = _classify_vmodel(expr)
+        if ctx == "other":
+            continue
+        if (ctx, name) not in fields:
+            _add(name, name, ctx)
 
+    # Table columns: always context="table"
+    for m in EL_TABLE_COLUMN_RE.finditer(text):
+        name = m.group("name")
+        label = m.group("label")
+        _add(name, label, "table")
+    for m in EL_TABLE_COLUMN_LABEL_FIRST_RE.finditer(text):
+        name = m.group("name")
+        label = m.group("label")
+        _add(name, label, "table")
+
+    # Rules required
     for m in RULES_REQUIRED_RE.finditer(text):
         name = m.group("name")
-        if name in fields:
-            fields[name]["required"] = True
+        # Mark the first context match for this name as required.
+        for (ctx, n) in list(fields.keys()):
+            if n == name:
+                fields[(ctx, name)]["required"] = True
+                break
 
     return list(fields.values())
 

@@ -11,7 +11,8 @@ Handles:
   - path: '/x' (string)
   - name: 'X' (identifier or string)
   - component: () => import('@/views/...')
-  - meta: { title, requiresAuth, perms, icon }
+  - meta: { title, requiresAuth, perms, icon, roles, permissions }
+  - top-level roles: / permissions: arrays (RuoYi style, outside meta{})
   - nested children: [...] (recurses with parent path prefix)
 
 Output schema (JSON array; one entry per router path):
@@ -66,8 +67,19 @@ REQUIRES_AUTH_RE = re.compile(
 PERMS_RE = re.compile(
     r"perms:\s*\[([^\]]*)\]", re.MULTILINE
 )
+# RuoYi style: `permissions: [...]` at route top level (not inside meta{})
+# Match either perms or permissions keys; we collect both into the same `perms` field.
+PERMISSIONS_RE = re.compile(
+    r"permissions:\s*\[([^\]]*)\]", re.MULTILINE
+)
+ROUTE_ROLES_RE = re.compile(
+    r"^\s*roles:\s*\[([^\]]*)\]", re.MULTILINE
+)
 TITLE_RE = re.compile(
     r"title:\s*['\"]([^'\"]+)['\"]", re.MULTILINE
+)
+ICON_RE = re.compile(
+    r"icon:\s*['\"]([^'\"]+)['\"]", re.MULTILINE
 )
 CHILDREN_RE = re.compile(
     r"children:\s*\[", re.MULTILINE
@@ -148,15 +160,31 @@ def extract_from_router(path: Path) -> list[dict]:
         comp_m = COMPONENT_RE.search(block) or COMPONENT_NAME_RE.search(block)
         auth_m = REQUIRES_AUTH_RE.search(block)
         perms_m = PERMS_RE.search(block)
+        perms_top_m = PERMISSIONS_RE.search(block)
+        roles_top_m = ROUTE_ROLES_RE.search(block)
         title_m = TITLE_RE.search(block)
+        icon_m = ICON_RE.search(block)
+
+        # Merge perms (from meta) and permissions/roles (top-level).
+        # Per the convention: top-level (RuoYi) is the authoritative source
+        # for RBAC, while meta is for display.
+        merged_perms: list[str] = []
+        if perms_m:
+            merged_perms.extend(_stringify_perms(perms_m.group(1)))
+        if perms_top_m:
+            merged_perms.extend(_stringify_perms(perms_top_m.group(1)))
+        if roles_top_m:
+            # roles go into the same field; LLM can disambiguate by source path
+            merged_perms.extend(_stringify_perms(roles_top_m.group(1)))
 
         rec = {
             "path": path_val,
             "name": name_m.group(1) if name_m else None,
             "component": comp_m.group(1) if comp_m else None,
             "title": title_m.group(1) if title_m else None,
+            "icon": icon_m.group(1) if icon_m else None,
             "requires_auth": auth_m.group(1).lower() == "true" if auth_m else None,
-            "perms": _stringify_perms(perms_m.group(1)) if perms_m else [],
+            "perms": merged_perms,
             "module": _infer_module(path_val),
             "source": str(path),
         }
@@ -182,14 +210,25 @@ def extract_from_router(path: Path) -> list[dict]:
                 cc_m = COMPONENT_RE.search(child_block) or COMPONENT_NAME_RE.search(child_block)
                 ca_m = REQUIRES_AUTH_RE.search(child_block)
                 cp_m = PERMS_RE.search(child_block)
+                cp2_m = PERMISSIONS_RE.search(child_block)
+                cr_m = ROUTE_ROLES_RE.search(child_block)
                 ct_m = TITLE_RE.search(child_block)
+                ci_m = ICON_RE.search(child_block)
+                child_perms: list[str] = []
+                if cp_m:
+                    child_perms.extend(_stringify_perms(cp_m.group(1)))
+                if cp2_m:
+                    child_perms.extend(_stringify_perms(cp2_m.group(1)))
+                if cr_m:
+                    child_perms.extend(_stringify_perms(cr_m.group(1)))
                 routes.append({
                     "path": child_path,
                     "name": cn_m.group(1) if cn_m else None,
                     "component": cc_m.group(1) if cc_m else None,
                     "title": ct_m.group(1) if ct_m else None,
+                    "icon": ci_m.group(1) if ci_m else None,
                     "requires_auth": ca_m.group(1).lower() == "true" if ca_m else rec["requires_auth"],
-                    "perms": _stringify_perms(cp_m.group(1)) if cp_m else [],
+                    "perms": child_perms,
                     "module": _infer_module(child_path),
                     "source": str(path),
                 })

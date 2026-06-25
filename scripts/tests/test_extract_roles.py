@@ -83,5 +83,49 @@ class ExtractRolesTests(unittest.TestCase):
             self.assertEqual(roles[0]["role_name"], "X")
 
 
+    def test_ruoyi_v_hasPermi(self):
+        """RuoYi派系: v-hasPermi=['system:user:list']"""
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "User.vue").write_text(textwrap.dedent("""\
+                <template>
+                  <el-button v-hasPermi="['system:user:list']">List</el-button>
+                  <el-button v-hasPermi="['system:user:edit','system:user:remove']">Edit</el-button>
+                </template>
+            """), encoding="utf-8")
+            r = subprocess.run([sys.executable, str(SCRIPT), "/nonexistent", str(d)], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, msg=r.stderr)
+            roles = json.loads(r.stdout)
+            names = {x["role_name"] for x in roles}
+            self.assertIn("system:user:list", names)
+            self.assertIn("system:user:edit", names)
+            self.assertIn("system:user:remove", names)
+            frameworks = {x["framework"] for x in roles}
+            self.assertIn("vue:v-hasPermi", frameworks)
+
+    def test_ruoyi_router_top_level_permissions(self):
+        """RuoYi派系: 路由对象顶层 permissions: [...] 数组(不在 meta{}里)"""
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "router").mkdir()
+            (d / "router" / "index.js").write_text(textwrap.dedent("""\
+                export const dynamicRoutes = [
+                  { path: '/system/user-auth', component: Layout,
+                    permissions: ['system:user:edit'],
+                    children: [
+                      { path: 'role/:userId', component: () => import('@/x') }
+                    ]
+                  },
+                  { path: '/admin', component: Layout, roles: ['admin'] }
+                ]
+            """), encoding="utf-8")
+            r = subprocess.run([sys.executable, str(SCRIPT), "/nonexistent", str(d)], capture_output=True, text=True)
+            roles = json.loads(r.stdout)
+            perms = [x for x in roles if x["framework"] == "router:route-permissions"]
+            rroles = [x for x in roles if x["framework"] == "router:route-roles"]
+            self.assertEqual([p["role_name"] for p in perms], ["system:user:edit"])
+            self.assertEqual([p["role_name"] for p in rroles], ["admin"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,3 +1,127 @@
+## 2.0.0 (2026-06-25) — BREAKING: split recorder out of user-manual
+
+The recording phase has been a single-package subsystem of user-manual
+since v0.2.3. Over time it grew to ~3700 lines (≈56KB) inside
+`scripts/manual_helper.py` and gained its own dependency tree
+(playwright, ffmpeg, Pillow, edge-tts). v2.0.0 extracts it into a
+standalone skill at `~/.agents/skills/recorder` and slims the
+user-manual package down to its actual job: writing and validating
+markdown manuals.
+
+### What moved to the recorder skill
+
+- The browser-driven recording pipeline (Playwright + Chromium + webm
+  slicing + TTS + muxing) is now its own package: `recorder_plugin/`
+  with its own CLI (`python3 -m recorder_plugin.cli run` /
+  `apply-ai-responses` / `tts-synth` / `concat-narration` /
+  `mux-audio`), MCP server, and 19 unit + 4 integration tests.
+- The `recorder/` directory under `user-manual/` was deleted; the
+  standalone skill is identical, just relocated.
+
+### What changed in user-manual
+
+- `scripts/manual_helper.py` (3709 lines, 56KB) was split into a
+  12-file `manual_helper/` package (~3270 lines, similar total but
+  each file 50-500 lines).
+- Three recorder-side CLI subcommands were **removed** from
+  `manual_helper`:
+  - `record-manual <md>` — replaced by the Python function
+    `manual_helper.scan_recording_placeholders(text)`.
+  - `record-manual <md> --generate-template` — replaced by
+    `manual_helper.build_recorder_template(manual_name, placeholders, ...)`.
+  - `record-manual <md> --apply-mapping` — replaced by
+    `manual_helper.apply_recording_mapping(text, mapping)`.
+  - `record-and-replace <md>` — replaced by the LLM agent invoking
+    `recorder_plugin.cli run` + `apply_recording_mapping` in sequence.
+  - `check-recorder-script` — moved into `recorder_plugin.cli run`
+    preflight.
+- The Python functions that DO belong in user-manual (markdown-level
+  primitives: `scan_recording_placeholders`, `build_recorder_template`,
+  `apply_recording_mapping`, plus their internal helpers) are still
+  importable as `from manual_helper import …` and re-exported in
+  `manual_helper/__init__.py`.
+- `init-skill` no longer depends on `subprocess` for the recorder; the
+  `RecordingBlockedError` and `check_recording_readiness` flow is
+  unchanged, so `init-skill` still auto-installs deps and still exits
+  2 on a red env.
+- 45 unit tests were deleted (they tested the removed CLI subcommands).
+  Net test count: 147 → 100. The 5 pre-existing fixture failures in
+  `test_recording_readiness.py` (machine has playwright+ffmpeg, so
+  readiness returns green not yellow) are unchanged.
+
+### Migration
+
+| v1.x (old CLI) | v2.0.0 (new) |
+|---|---|
+| `manual_helper record-manual foo.md` | `from manual_helper import scan_recording_placeholders; scan_recording_placeholders(Path("foo.md").read_text())` |
+| `manual_helper record-manual foo.md --generate-template s.json` | `from manual_helper import build_recorder_template; json.dump(build_recording_template(…), open("s.json","w"))` |
+| `manual_helper record-manual foo.md --apply-mapping m.json` | `from manual_helper import apply_recording_mapping; Path("foo.md").write_text(apply_recording_mapping(text, json.load(open("m.json")))[0])` |
+| `manual_helper record-and-replace foo.md --script s.json` | Run `recorder_plugin.cli run s.json` then call `apply_recording_mapping` |
+| `manual_helper check-recorder-script s.json` | Use `recorder_plugin.cli run --dry-run s.json` (or just `run`; preflight errors are surfaced in the run output) |
+
+### Why this is better
+
+- **Smaller install surface**: projects that don't need recording
+  (CLI tools, pure APIs, no-UI manuals) no longer pull in
+  playwright/ffmpeg/Pillow just to write a manual.
+- **Faster skill load**: `manual_helper` is now 12 small files
+  instead of one 3700-line monolith; the package imports in
+  <50ms on a cold cache.
+- **Recorder can evolve independently**: the recorder skill
+  shipped v0.3.11 (humanized cursor motion, frame-accurate trim,
+  bezier bow) without touching user-manual, because the recorder
+  is no longer part of user-manual.
+- **No more "agent skipped step 3-5"**: §14 used to have a 5-step
+  workflow that agents routinely skipped. v2.0.0 collapses this
+  to: scan + build-template (Python) → run recorder (one CLI
+  command) → apply mapping (Python). Three steps, each with a
+  hard error if the previous one didn't complete.
+
+## 1.1.x (2026-06-25) — backfill: SKILL.md v1.1+ rules + helper coverage
+
+This entry backfills changes that landed in `SKILL.md` and the scripts
+between 2026-06-24 (v1.0.4) and today but were never recorded in the
+changelog. The first 4 items are SKILL.md content; the next 3 are helper
+behavior changes. Going forward, rule additions must come with a
+changelog entry in the same commit.
+
+### SKILL.md additions (rule tightening for business-user manuals)
+
+- **§2.7.1 业务用户文档禁列项** (v1.1.0): 6 classes of anti-patterns
+  the LLM must not emit. Validated by `validate-output.py` §verification-8.
+  - 类 1: `> 数据源:` 元注释
+  - 类 2: 后端 API endpoint 表格 / 列表 / 散落引用
+  - 类 3: 源码文件路径(任何上下文)
+  - 类 4: 仓库 / 目录结构引用
+  - 类 5: 录屏 / 截图占位段(`<!-- video-pending -->` /
+    `⏳ **视频录屏待补**` / `recorder-scripts/vN-*.json`)
+- **§2.7.1 类 6** (v1.1.1): 事实性内容禁估算。helper 抽得到的数字
+  / 错误码 / 函数名必须从代码读,不允许 LLM 凭印象写。Tier 3 例外。
+- **§2.7.1 类 7a** (v1.1.3): 业务概念术语必译(`mock` / `toast` /
+  `drawer` / `token` / 等),代码标识符保留英文。
+
+### Helper behavior changes
+
+- **extract-roles.py** (v1.1.x): 增加了 RuoYi / vue-element-admin 派系
+  的指令支持,具体在 `yangzongzhuan/RuoYi-Vue3` 上验证(60 个角色 /
+  权限命中,旧版本为 0):
+  - 前端指令 `v-hasPermi` / `v-hasRole`
+  - 路由对象顶层 `roles: [...]` / `permissions: [...]` (RuoYi 风格,
+    在 `meta: {}` 外)
+  - 路由 `meta: {}` 内的 `roles` / `permissions` (vue-element-admin 风格)
+  - 修复: `_extract_quoted` 路径中 `startswith(("[", "["))` 是恒真
+    元组导致所有值都按列表解析
+- **extract-routes.py** (v1.1.x): 增加了对 `meta.icon` 和顶层
+  `permissions: [...]` / `roles: [...]` 的解析(`perms` 字段自动合并
+  两个来源)。在 RuoYi 上验证 `perms` 命中从 0 提升到 25。
+
+### init scaffold changes (v1.1.x)
+
+- 删除 `## Daily Usage` / `## Architecture and Internals` /
+  `## Concepts and Glossary` 三个 §3 v1 标记为"已废弃"的章节
+- `## Citations` 现在按 `manual-config.json: include_citations` 条件
+  生成(默认 OFF,与 §6 行为一致)
+
 # Changelog
 
 ## 1.0.4 (2026-06-24) — recorder v0.3.9: human-looking cursor

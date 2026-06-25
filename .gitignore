@@ -17,7 +17,12 @@ __pycache__/
 build/
 dist/
 
-# recorder plugin
-recorder/.recorder_state.json
-recorder/tests/fixtures/static_site/uploads/
+# recorder skill (now lives at ~/.agents/skills/recorder, not in this repo)
+# state files written by recorder runs into arbitrary project dirs
+.recorder_state.json
+.recorder_state.lock
+_narration_segments/
 *.auth.json
+
+# recorder test artifacts (left in scripts/docs/ by recorder runs)
+scripts/docs/

@@ -170,7 +170,8 @@ class ValidateOutputTests(unittest.TestCase):
             # v0.5.4: 8 checks now (added placeholder_alt).
             # v1.0.1: 9 checks now (added directory_anchors).
             # v1.0.1: 10 checks now (added task_card_headings).
-            self.assertEqual(len(data[0]["checks"]), 10)
+            # v1.1.0: 11 checks now (added audience_leak per SKILL §2.7.1).
+            self.assertEqual(len(data[0]["checks"]), 11)
             names = [c["name"] for c in data[0]["checks"]]
             self.assertIn("screenshot files exist", names)
         finally:

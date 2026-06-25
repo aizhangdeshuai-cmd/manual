@@ -613,9 +613,23 @@
         }
       });
     }
-    // 给 h2 加 id(供 anchor 跳转 / scrollspy 使用)
+    // v0.5.1: 给 h2 加 id(供 anchor 跳转 / scrollspy 使用)
     const h2 = wrap.querySelector("h2");
     if (h2 && !h2.id) h2.id = h2id;
+    // v0.5.1: 给所有 h3 写 id, 与 buildToc 中虚拟 h3 的 id 规则一致
+    // buildToc 用 slugify(t.text) + "-pending-" + heads.length;
+    // 但 heads.length 取决于 buildToc 时遍历顺序,不便回溯。
+    // 简化方案: 用 chunk.tokens 中 h3 的真实 slug 作为 id
+    let h3Idx = 0;
+    let pastH2 = false;
+    for (const t of chunk.tokens) {
+      if (t.type === "heading" && t.depth === 2) { pastH2 = true; continue; }
+      if (pastH2 && t.type === "heading" && t.depth === 3) {
+        const h3 = wrap.querySelectorAll("h3")[h3Idx];
+        if (h3 && !h3.id) h3.id = "h3-" + slugify(t.text);
+        h3Idx++;
+      }
+    }
     placeholder.replaceWith(wrap);
     // 图懒加载 + 点击放大
     wrap.querySelectorAll("img").forEach(img => {
@@ -716,7 +730,8 @@
           if (t.type === "heading" && t.depth === 2) { pastH2 = true; continue; }
           if (pastH2 && t.type === "heading" && t.depth === 3) {
             const vh3 = document.createElement("h3");
-            vh3.id = slugify(t.text) + "-pending-" + heads.length;
+            // v0.5.1: 与 renderChunkOnDemand 渲染后真实 h3 的 id 规则一致
+            vh3.id = "h3-" + slugify(t.text);
             vh3.textContent = t.text || "";
             vh3.dataset.virtual = "1";
             heads.push(vh3);
@@ -770,13 +785,12 @@
         const id = details.dataset.target;
         // 该 h2 可能还在 pendingChunks, 先 force 渲染出来再跳转
         renderChunkOnDemand(id);
-        // v0.5.0 fix: if the TOC entry corresponds to a virtual
-        // heading (the chunk was just lazy-rendered), the original
-        // h2 element was replaced by a real one with the same id.
-        // getElementById returns whichever is still in DOM. Wait
-        // one tick for the placeholder.replaceWith to settle.
+        // v0.5.1 fix: 限定在 els.article 内查找目标元素,避免命中 tocList
+        // 里的虚拟 h2(在 buildToc 时为 lazy chunk 创建的占位节点)。
+        // 之前 document.getElementById 会返回 tocList 里的虚拟 h2,
+        // scrollIntoView 滚到 sidebar 自己,不会定位主内容。
         requestAnimationFrame(() => {
-          const target = document.getElementById(id);
+          const target = els.article.querySelector("#" + CSS.escape(id));
           if (target) {
             target.scrollIntoView({ behavior: "smooth", block: "start" });
             details.open = true;
@@ -795,8 +809,9 @@
         const detailsEl = a.closest(".toc-group");
         if (detailsEl) renderChunkOnDemand(detailsEl.dataset.target);
         renderChunkOnDemand(id);
+        // v0.5.1 fix: 限定在 els.article 内查找目标元素(同 summary)
         requestAnimationFrame(() => {
-          const target = document.getElementById(id);
+          const target = els.article.querySelector("#" + CSS.escape(id));
           if (detailsEl) {
             detailsEl.open = true;
             syncToggleAllLabel();

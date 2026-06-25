@@ -198,6 +198,95 @@ A: ...
 
 **仅这 4 种锚点**,不在此 4 类的内容用普通段落,不用其他 emoji。
 
+### 2.7.1 业务用户文档禁列项(v1.1.0 新增,v1.1.1 扩)
+
+> 业务用户(运营 / 专员 / 主管 / 审批人 / 外部协作方)读这份手册时,看到的应该是**操作内容**,不是**生成过程**也不是**开发信息**。
+> 任何让用户看到"这文档是怎么写出来的"或"代码长什么样"的内容都属于创作痕迹,**禁止写入**。
+> 规则不能靠"换措辞绕开"——下表是**模式**匹配(代码 + 含义),LLM 不能用同义词 / 缩写 / 上下文跳转 / 中文转英文来绕过。`validate-output.py` §verification-8 强制执行。
+
+**6 类禁列项**:
+
+1. **`> 数据源:` 类元注释** — 任何形如 `> 数据源:...` 的引用块,说明"这段内容从哪里抽出来的"。
+   - ❌ `> 数据源:LLM 静态读取 report-admin-ui/src/types/report.ts + utils/fieldType.ts。`
+   - ❌ `> 数据源:manual-config.json.auto_extracted + LLM 静态读取。`
+   - ❌ `> 数据来自 ehr-report/.../common/ErrorCode.java`
+   - ✅ 改用:不写。需要解释时,放 LLM 内部 prompt,不放用户文档。
+
+2. **后端 API endpoint(任何上下文)** — 业务用户不需要看后端 `/report/...` 接口。
+   - ❌ 任何 4+ 列的"方法 / 路径 / 用途 / 鉴权"API 表
+   - ❌ bulleted list / Q&A 块 / "如果你卡住了" 答案里出现 `/report/field/validate-expr`、`/report/config/{code}/disable` 这类 endpoint
+   - ✅ 改用:任务卡步骤里直接说"提交保存"(用户视角),不提具体路径。
+   - ✅ **路由保留**(`/report/list` / `/report/{c}/designer/{c}` 是用户访问的浏览器 URL,与 API endpoint 区分)
+   - 例外:技术附录(面向开发),不属于本 skill 范围。
+
+3. **源码文件路径(任何上下文)** — 业务用户不需要知道代码在哪。
+   - ❌ 任何"模块 / 路径"形式的文件清单(`report-admin-ui/src/...` / `ehr-report/...`)
+   - ❌ Q&A / bulleted list / 备注 里出现具体文件名(如 `ReportConfigController.java`)
+   - ✅ 改用:不写。开发同学自己看 IDE / Git。
+
+4. **仓库 / 目录结构引用(任何上下文)** — 业务用户不需要知道后端 / 前端 / 文档各放哪个仓库。
+   - ❌ 列表项 / 句子出现 `ehr-report/` / `report-admin-ui/` / `docs/user-manual/`
+   - ❌ "(项目根 `ehr/`)" / "项目根: `my-app/`" / "repo root `xxx/`" / "代码根目录 `xxx/`" / "项目仓库 `xxx/`" 任何形式
+   - ✅ 改用:附录 B 联系支持只列 3 类角色:**平台管理员**、**报表配置员 / 业务专员**、**数据 / HR 业务接口人**。代码 / 部署问题不写,开发同学有内部渠道。
+
+5. **录屏 / 截图占位段** — 业务用户读手册时不应看到"待录 / 脚本就绪 / 录屏骨架"。
+   - ❌ `<!-- video-pending: v7 ... -->` HTML 注释
+   - ❌ `⏳ **视频录屏待补**:...` 提示段
+   - ❌ `recorder-scripts/vN-*.json` 引用
+   - ❌ 任何"待录" / "已写脚本,跑 X 命令即可生成" / 指向内部开发脚本的链接
+   - ✅ 改用:录屏真实存在时,直接 `<video src="...">` 内联;不存在时,**任务卡正常交付,没有视频就行**,不要告诉用户"待补"。
+
+6. **事实性内容禁估算(v1.1.1 新增)** — 用户按手册操作,涉及数字 / 列表 / 错误码 / 函数名 时,必须**从代码抽**而不是 LLM 估算。
+   - ❌ 凭印象写"22 个函数"(实际 19 个,差 3 个就是误导)
+   - ❌ 凭印象写错误码 2001="必填项缺失"(实际 2001="无权限访问该公司数据")
+   - ❌ 凭印象写"支持 3 种筛选",实际有 6 种
+   - ✅ 改用:用 §5.1 列出的 5 个 extract helper 抽(`extract-tasks` / `extract-fields` / `extract-routes` / `extract-roles` / `extract-openapi`),数字和列表必须从代码读。
+   - ✅ Tier 3(LLM-only mode)例外:helper 不可用时,在手册末尾用 1 行 `[LLM-ESTIMATED]` 标注哪些内容是估算的(让用户知道可信度)。
+   - ⚠️ **本类由 LLM 行为规范保证**,不由 `validate-output.py` 强制(因为没有可靠的模式匹配)。CI / 抽检 / peer review 应作为兜底。
+
+7a. **业务概念术语必译(v1.1.3 新增)** — 业务用户手册面向**业务用户**(运营 / 专员 / 主管),不面向开发者。文档中**所有业务概念性质的英文术语必须译为中文**;**代码标识符 / 函数名 / API endpoint / 后端类名保留英文**(因为翻译就找不到了)。
+
+   - **必译**(业务概念 / 通用 UI 术语):
+     - `mock` → 演示 / 演示环境
+     - `localStorage` → 本地存储(或保留为术语,首次出现用"浏览器本地存储 `localStorage`")
+     - `sessionStorage` / `cookie` → 同上
+     - `toast` → 顶部提示 / 提示框
+     - `drawer` → 抽屉
+     - `modal` / `dialog` → 弹窗 / 对话框
+     - `skeleton` → 骨架屏
+     - `spinner` → 加载中
+     - `Q:` / `A:` → 保留(中英文 Q&A 都用)
+     - `token` → 登录身份(用户不知道 token 是什么)
+     - `hidden` (作为状态描述) → 隐藏
+     - `group` (作为功能描述) → 分组
+     - `mock` / `fake` / `stub` → 演示 / 假数据
+     - 通用 UI 英文词:`enabled` `disabled` `default` `required` `optional` `nullable` `readonly`
+   - **保留英文**(代码标识符 / 业务不可改的命名):
+     - 后端字段名:`att.clock_in` / `emp.emp_no` / `work_duration`
+     - 报表编码:`att_raw_default` / `monthly_att`
+     - 函数名:`IF` / `COALESCE` / `TIMEDIFF` / `LIKE` / `CONCAT` / `EXCEL` 公式语法
+     - 操作符:`=` / `>` / `<` / `IN` / `BETWEEN`
+     - 字段类型值:`STRING` / `NUMBER` / `DATE` / `DATETIME` / `DURATION` / `BOOLEAN` / `UPSTREAM` / `EXPR` / `CONST`
+     - 键名 / 路径 / 端口号(用户访问的浏览器 URL 保留)
+   - **改名 / 删**:
+     - 后端类名(对用户无意义):`ReportQueryGuard` / `ErrorCode` / `ReportConfigController` 等 → 删
+     - 后端文件名:`ErrorCode.java` / `ReportConfigController.java` 等 → 删
+     - 已在类 3(源码路径)覆盖
+   - ⚠️ **本类由 LLM 行为规范 + 人工审查保证**,不由 `validate-output.py` 强制(因为"业务概念"vs"代码标识符"是语义判断,模式识别误伤率高)。
+
+7. **架构 / 部署信息禁列(v1.1.2 新增)** — 业务用户进手册是来"做操作"的,不是来"看架构图 / 部署拓扑"的。这类信息对**开发 / 运维**有用,对业务用户没有应用价值。
+   - ❌ 后端 URL / 端口号:`http://localhost:9001/`、`http://api.example.com/v2`
+   - ❌ 后端技术栈版本:`Spring Boot 2.7`、`H2 in-memory`、`Vue 2.7 + Element UI`、`Node.js 18`、`PostgreSQL 14`
+   - ❌ 架构提示:"3 个核心页面用**同一套后端 API**"、"前后端用 RESTful 通信"、"前端是 SPA 单页应用"
+   - ❌ 模块地图(路由列表 + 用途说明):"报表列表 `/report/list` — 找报表、版本治理"
+   - ❌ 部署 / 启动命令:`mvn spring-boot:run`、`npm run serve`、`launchd 加载 com.local.ehr-backend`
+   - ✅ **前端 URL 保留**:`http://localhost:8088/` 是用户访问的入口,业务用户需要。
+   - ✅ **改用用户视角**:"3 个核心页面用**同一份数据**" 替代 "用同一套后端 API";"改完字段要看效果" 替代 "前端调 RESTful 接口"。
+   - ✅ 路由(`/report/list`、`/report/{c}/designer/{c}`)作为"操作入口"在任务卡里出现 OK,作为"模块地图"列出禁。
+
+> 写给 LLM 的提示:你(LLM)在 §5.3 合成 markdown 时,生成的输出里**不应该**包含上述 6 类内容;如果发现已经在脑里浮现了,删掉再写。`validate-output.py` 会卡住你。
+> 关键:**规则是模式匹配**,不是关键词列表。改同义词 / 改英文 / 改上下文位置 / 把表改成 bullet / 把 bullet 改成段落——**都不能绕过**。
+
 ### 2.8 飞书/钉钉风格 — 完整正反例(LLM 必看)
 
 > 本节是 §2.1-§2.7 的**完整示范**。LLM 写任务卡时遇到不确定,先回这里对一遍。
@@ -360,7 +449,7 @@ narration_rate: "+0%"  # 可选,语速调节
 - narration 是**可选字段**,不写就不配音,录屏走原流程
   - **v0.5.1:** 缺 `narration` 字段的 video_stop 在运行时会有 stderr WARNING 提示
     (例:`WARNING: 3 video session(s) have NO \`narration\` field; output videos
-    will be SILENT. ...`),并在 skill 端 `check-recorder-script` 报 FAIL,免得
+    will be SILENT. ...`),并在 recorder 端`recorder_plugin.cli run`preflight 报 FAIL,免得
     "录完才发现没声音"才回头查
   - 需要 CI 强制要求?在 v0.5.1 之后会再加 `--strict-narration` flag 让
     `_preflight_narration_coverage(force=True)` 抛错退出
@@ -635,6 +724,11 @@ LAZY=$(grep -cE '!\[\s*(占位[:：]|<TODO|screenshot|img[0-9]*|\u7cfb\u7edf\u62
 AUTO=$(grep -c "(auto)" "$F")
 [ "$AUTO" -eq 0 ] || { echo "FAIL: Citations 仍有 $AUTO 个 (auto) 占位 — 跑 fill-citation-shas"; exit 1; }
 
+# 验证 8(v1.1.0): 业务用户文档禁列项 — §2.7.1 前 5 类 audience_leak 模式
+# 见 SKILL.md §2.7.1 + validate-output.py audience_leak 检查项
+LEAK=$(python3 -c "from scripts.validate_output import _check_audience_leak; import sys; sys.exit(0 if _check_audience_leak(open('$F').read())['clean'] else 1)" 2>/dev/null; echo $?)
+[ "$LEAK" = "0" ] || { echo "FAIL: audience_leak — 手册含 §2.7.1 禁列项(数据源注释 / 后端 API 表 / 源码路径表 / 仓库目录 / 录屏占位段)"; exit 1; }
+
 # v0.4.0(opt-in): 截图去重 — 同 SHA256 不应被 2+ 不同文件名引用
 # 默认不强制,跑 `validate-output.py --unique` 才生效
 # 建议在 CI 中跑,首次生成时必跑;已有手册用 --unique-allow 显式放行
@@ -698,6 +792,7 @@ python3 -m manual_helper fill-citation-shas docs/user-manual/manual/<name>.md
 | `build-standalone <html-template> <html-out> <md-path> [more...]` | 构建 `file://` 双击版 |
 | **`read-config`** | 打印 effective `manual-config.json` |
 | **`validate-config`** | 校验 `manual-config.json` + `personas.json` 完整,业务目标覆盖度 ≥ 2 类别 |
+| `check-recording-readiness [project-root]` | v0.3.1 pre-flight: dev server / playwright / Chromium / ffmpeg 状态。返回 0=绿 / 1=黄 / 2=红。`init-skill` 自动调用 |
 
 > **recorder 插件的子命令**(opt-in,装 recorder 后才有):
 >
@@ -706,6 +801,8 @@ python3 -m manual_helper fill-citation-shas docs/user-manual/manual/<name>.md
 > | **`tts-synth <text> --out PATH`** | edge-tts 合成一段旁白 → mp3(可选 `--voice` / `--rate`) |
 > | **`concat-narration <seg1> <seg2> [...] --out PATH [--gap S]`** | 多段旁白 mp3 拼接,段间插入静音(默认 2.0s) |
 > | **`mux-audio <video> <audio> --out PATH`** | 旁白音轨合并到录屏视频(自动处理时长差,产物 = 旁白长度) |
+| **`run <script.json>`** | 驱动 headless Chromium 跑完整录屏脚本,产出 .png / .mp4。返回 JSON 状态报告 |
+| **`apply-ai-responses <output-dir>`** | 应用 agent 写的 AI 标注响应(Pillow),产出 `<name>.ai-annotated.png` |
 | **`init-db`** | 应用 schema.sql 到 Postgres(idempotent) |
 | **`upsert-manual <md-path>`** | POST markdown + frontmatter 到 API(db 模式) |
 | **`upload-asset <manual-file> <asset-path>`** | 上传二进制到 S3/MinIO,注册到 `manual_assets` |
@@ -777,22 +874,28 @@ The recorder produces files matching the `<domain>-<task>-<element>.png` naming 
 
 **This section is mandatory for the LLM agent.** A manual full of `[SCREENSHOT: x]` placeholders is **not** a finished manual — it's a draft. The recording phase fills those placeholders with real assets.
 
-> **v0.4.0 (recorder-on)**: §14 used to be 5 manual steps that the LLM agent
-> had to remember to do in order. In practice, agents skipped steps 3-5
-> (recorder invocation, mapping) and the user got a "finished" manual
-> with no real assets. v0.4.0 collapses §14 to a single command:
+> **v2.0.0 (skill split)**: The recording phase is now **coordinated by
+> the LLM agent**, not by a single `manual_helper` subcommand. v1.x had
+> `record-and-replace` and `record-manual` as one-shot CLIs, but the
+> recorder is a separate skill at `~/.agents/skills/recorder` (it has
+> its own `recorder_plugin` package, MCP server, and CLI). v2.0.0
+> removes the CLIs from user-manual and exposes the **markdown-level
+> primitives** as Python functions only:
 >
-> ```bash
-> python3 -m manual_helper record-and-replace <manual.md> \
->     --script <recorder-script.json>
+> ```python
+> from manual_helper import (
+>     scan_recording_placeholders,   # find [SCREENSHOT: x] / [VIDEO: x] / [AI ANNOTATE: x]
+>     build_recorder_template,        # emit a recorder script template from the manual
+>     apply_recording_mapping,        # replace placeholders with real asset paths
+> )
 > ```
 >
-> This runs pre-flight checks → invokes the recorder → builds the mapping
-> → applies it to the manual → runs `validate-output.py --unique`. One
-> command, one exit code, no step to forget. Use `--dry-run` to preview
-> the mapping without actually recording.
+> The **browser-level work** (Playwright launch, video recording, TTS,
+> muxing) stays in the recorder skill. See `~/.agents/skills/recorder/SKILL.md`
+> for the `run` / `apply-ai-responses` / `tts-synth` / `mux-audio` CLI
+> subcommands.
 >
-> **Pre-condition (v1.0.0)**: `init-skill` auto-installs the
+> **Pre-condition (v1.0.0, unchanged)**: `init-skill` auto-installs the
 > recorder dependencies (`playwright` + Chromium) and exits 2 if
 > the recording phase cannot run (dev server unreachable, deps
 > missing). There is no opt-out: fix the environment and re-run.
@@ -831,24 +934,31 @@ mode to use, with a default of "record":
 ### Workflow (mode = `record` or `screenshot-only`)
 
 ```
-1. LLM agent runs:
-   python3 -m manual_helper record-manual <path-to-manual.md>
-   # → prints: "RECORDING_NEEDED: N screenshots, M videos" (and any
-   #   [AI ANNOTATE: x] markers, see §15)
+1. LLM agent scans the manual for placeholders (Python import, NOT a CLI):
+   from manual_helper import scan_recording_placeholders
+   placeholders = scan_recording_placeholders(Path("manual.md").read_text())
+   # → list of {"kind", "name", "line", "raw", "needed"} dicts
 
-2. (Optional) LLM agent asks user for URL + creds, then runs:
-   python3 -m manual_helper record-manual <path> --generate-template <out.json>
-   # → emits a recorder script template the agent fills in
+2. LLM agent asks user for URL + creds, then generates a recorder
+   script template (Python import, NOT a CLI):
+   from manual_helper import build_recorder_template
+   template = build_recorder_template(
+       manual_name="sys-user-manual",
+       placeholders=placeholders,
+       manual_path=Path("manual.md"),
+       project_root=Path("."),
+   )
+   Path("recorder-script.json").write_text(json.dumps(template, indent=2))
+   # → the agent fills in TODO selectors / click sequences
 
-3. LLM agent invokes the recorder opt-in plugin to record.
-   The recorder (see recorder/SKILL.md) is opt-in — if it's not installed,
-   this step fails. The user must `pip install -e recorder/[test]` per
-   recorder/INSTALL.md and re-run.
+3. LLM agent invokes the recorder skill (separate CLI, NOT in manual_helper):
+   python3 -m recorder_plugin.cli run recorder-script.json
+   # → produces real .png / .mp4 files in <output_dir>
+   # See ~/.agents/skills/recorder/SKILL.md for full reference.
 
-   ⚠️  v0.2.4: after `python3 -m recorder_plugin.cli run <script>`,
-   the output JSON's `pending_ai_annotations` field may list vision
-   requests. **Do not skip this.** The agent MUST handle it BEFORE
-   --apply-mapping. See §15 for the full flow.
+   ⚠️  v0.2.4: the output JSON's `pending_ai_annotations` field may list
+   vision requests. **Do not skip this.** The agent MUST handle it BEFORE
+   applying the mapping. See §15 for the full flow.
 
 4. (v0.2.4 only — agent-mediated AI annotation, see §15):
    for each entry in pending_ai_annotations:
@@ -870,25 +980,41 @@ mode to use, with a default of "record":
    }
    (the `ai-annotated-*` keys are only present if §15 was used)
 
-6. LLM agent runs:
-   python3 -m manual_helper record-manual <path> --apply-mapping <mapping.json>
+6. LLM agent applies the mapping (Python import, NOT a CLI):
+   from manual_helper import apply_recording_mapping
+   text = Path("manual.md").read_text()
+   new_text, replaced, missing, total = apply_recording_mapping(text, mapping)
+   Path("manual.md").write_text(new_text)
    # → replaces [SCREENSHOT: x] / [VIDEO: x] / [AI ANNOTATE: x] placeholders
    #   with ![x](path) markdown
-   # → prints "replaced: N placeholders, placeholders still missing: M"
-   # → **v1.0.0**: M MUST be 0. If recorder missed any, fix the script
-   #   and re-run. A manual with unreplaced placeholders does not
-   #   satisfy the user's requirement (real screenshots + narrated video).
+   # → **v1.0.0**: `missing` MUST be empty. If recorder missed any, fix
+   #   the script and re-run. A manual with unreplaced placeholders does
+   #   not satisfy the user's requirement (real screenshots + narrated video).
 ```
 
-### Helper subcommand reference
+### Recording-phase API reference (v2.0.0)
 
-| Subcommand | Purpose |
+The user-manual skill exposes the **markdown-level primitives** as Python
+functions. The browser-level work lives in the recorder skill.
+
+| Python API (in `manual_helper`) | Purpose |
 |---|---|
-| `record-manual <manual.md>` | Scan and report placeholders (`[SCREENSHOT:]`, `[VIDEO:]`, `[AI ANNOTATE:]`). Exits 0 always; never modifies the manual. |
-| `record-manual <manual.md> --generate-template <out.json>` | Same, plus emit a recorder script template the LLM agent fills in. |
-| `record-manual <manual.md> --apply-mapping <mapping.json>` | Replace placeholders with real paths from the mapping. Writes the manual back. Recognizes all 3 placeholder kinds. |
-| `record-and-replace <manual.md> --script <recorder.json>` | **v0.4.0**: one-shot pre-flight + run recorder + build mapping + apply + validate. Replaces the 5-step §14 workflow. Pass `--dry-run` to preview the mapping without recording. |
-| `init-skill [--no-install]` | Bootstrap a fresh project. **v1.0.0**: auto-installs recorder deps (playwright + Chromium) when missing; exits 2 loudly if the dev server is unreachable. **No opt-out** — `--allow-blocked` was removed. |
+| `scan_recording_placeholders(text: str)` | Scan markdown for `[SCREENSHOT:]` / `[VIDEO:]` / `[AI ANNOTATE:]` markers. Returns list of dicts with `kind`, `name`, `line`, `raw`, `needed`. Excludes placeholders inside fenced code blocks. |
+| `build_recorder_template(manual_name, placeholders, manual_path=..., project_root=...)` | Emit a recorder-compatible `script.json` template. Auto-fills `url` from `manual-config.json:project.host/port`; auto-fills `output_dir` from manual name; infers `auth_env` from manual name (e.g. `legal-user-manual` → `LEGAL_USER`/`LEGAL_PASS`). |
+| `apply_recording_mapping(text, mapping)` | Replace placeholders with real asset paths. Mapping values may be strings (path only) or `{path, alt}` dicts (v0.3.0+). Returns `(new_text, replaced, missing, total)`. Writes the manual back is the caller's job. |
+| `check-recording-readiness` (CLI, still in `manual_helper`) | v0.3.1 pre-flight: dev server, playwright, Chromium, ffmpeg. Returns 0=green / 1=yellow / 2=red. Called by `init-skill` automatically. |
+| `init-skill [--no-install]` (CLI) | Bootstrap a fresh project. **v1.0.0**: auto-installs recorder deps (playwright + Chromium) when missing; exits 2 loudly if the dev server is unreachable. **No opt-out** — `--allow-blocked` was removed. |
+| **Recorder skill CLI** (in `~/.agents/skills/recorder`) | Purpose |
+| `python3 -m recorder_plugin.cli run <script.json>` | Drive a headless Chromium via Playwright per the script; emit .png / .mp4 files in `<output_dir>`. Returns a JSON status report. |
+| `python3 -m recorder_plugin.cli apply-ai-responses <output-dir>` | Apply agent-written AI annotation responses via Pillow. Reads `.ai_annotation_request_*.json` + `.ai_annotation_response_*.json`, writes `<name>.ai-annotated.png`. |
+| `python3 -m recorder_plugin.cli tts-synth <text> --out PATH` | edge-tts 合成一段旁白 → mp3(可选 `--voice` / `--rate`)。 |
+| `python3 -m recorder_plugin.cli concat-narration <seg1> <seg2> [...] --out PATH [--gap S]` | 多段旁白 mp3 拼接,段间插入静音(默认 2.0s)。 |
+| `python3 -m recorder_plugin.cli mux-audio <video> <audio> --out PATH` | 旁白音轨合并到录屏视频(自动处理时长差,产物 = 旁白长度)。 |
+
+**Removed in v2.0.0** (use the recorder CLI / Python API above instead):
+`record-manual`, `record-and-replace`, `check-recorder-script` — these were
+internal subcommands that pre-dated the recorder skill split. The recorder
+skill has its own preflight, runner, and asset pipeline.
 
 ## 15. AI 标注阶段 (v0.2.4 — agent-mediated, provider-agnostic)
 
@@ -947,7 +1073,7 @@ The script's output JSON includes `pending_ai_annotations: [...]` with the reque
    ```json
    {"ai-annotated-01-list": "screenshots/01-list.ai-annotated.png"}
    ```
-   And run `record-manual --apply-mapping` to wire it in.
+   And call `manual_helper.apply_recording_mapping(text, mapping)` to wire it in.
 
 ### v0.3.0: mapping values can be `{path, alt}` for human-readable alt text
 

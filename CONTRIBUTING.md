@@ -86,15 +86,17 @@ to rebuild the standalone version (see `build_standalone()` in
 
 ## Opt-in plugins
 
-A top-level directory (e.g. `recorder/`) may declare its own dependencies
-in its own `pyproject.toml` and ship its own `.github/workflows/<name>-ci.yml`.
-The plugin's CI runs in a separate job and is opt-in: maintainers may
-disable it for a release if the plugin is broken.
+Opt-in plugins are SKILLs that live **outside** the user-manual repo
+and are installed separately. The first such plugin was the `recorder`
+skill (extracted from user-manual in v2.0.0 — it now lives at
+`~/.agents/skills/recorder` as a standalone repo with its own
+`pyproject.toml`, `INSTALL.md`, `SKILL.md`, and CI).
 
-The plugin's `INSTALL.md` must list every pip package and system binary
-it requires. The plugin's `SKILL.md` frontmatter must declare it as
+A plugin's `SKILL.md` frontmatter must declare it as
 `requires: [user-manual]` so the parent user-manual skill knows it is
-optional.
+optional. The plugin's `INSTALL.md` must list every pip package and
+system binary it requires. The plugin's CI is independent of the
+user-manual CI (lives in its own repo).
 
 The `stdlib only` style constraint above applies to files under `scripts/`,
 not to opt-in plugin directories.

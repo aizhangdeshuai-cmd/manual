@@ -9,12 +9,12 @@ from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 PYTHON = os.environ.get("PYTHON", "python3")
-SCRIPT = SCRIPTS_DIR / "manual_helper.py"
+SCRIPT = SCRIPTS_DIR / "manual_helper"
 
 
 def run(*args, cwd=None):
     return subprocess.run(
-        [PYTHON, str(SCRIPT), *args],
+        [PYTHON, "-m", "manual_helper", *args],
         capture_output=True, text=True, cwd=cwd or str(SCRIPTS_DIR),
     )
 

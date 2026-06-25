@@ -113,5 +113,50 @@ class ExtractFieldsTests(unittest.TestCase):
             self.assertEqual(fields["st"]["type"], "下拉选择")
 
 
+    def test_context_form_vs_query(self):
+        """v-model="form.X" -> context=form; v-model="queryParams.X" -> context=query."""
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "M.vue"
+            f.write_text(textwrap.dedent("""\
+                <template>
+                  <el-form :model="queryParams" :inline="true">
+                    <el-form-item prop="userName" label="名称">
+                      <el-input v-model="queryParams.userName" />
+                    </el-form-item>
+                  </el-form>
+                  <el-dialog>
+                    <el-form :model="form" :rules="rules">
+                      <el-form-item prop="nickName" label="昵称">
+                        <el-input v-model="form.nickName" />
+                      </el-form-item>
+                    </el-form>
+                  </el-dialog>
+                </template>
+            """), encoding="utf-8")
+            r = subprocess.run([sys.executable, str(SCRIPT), str(f)], capture_output=True, text=True)
+            fields = {(f["name"], f["context"]) for f in json.loads(r.stdout)}
+            self.assertIn(("userName", "query"), fields)
+            self.assertIn(("nickName", "form"), fields)
+
+    def test_context_table_column(self):
+        """<el-table-column prop="X" label="Y"> -> context=table."""
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "L.vue"
+            f.write_text(textwrap.dedent("""\
+                <template>
+                  <el-table :data="rows">
+                    <el-table-column prop="id" label="编号" />
+                    <el-table-column label="姓名" prop="name" />
+                  </el-table>
+                </template>
+            """), encoding="utf-8")
+            r = subprocess.run([sys.executable, str(SCRIPT), str(f)], capture_output=True, text=True)
+            fields = {f["name"]: f for f in json.loads(r.stdout)}
+            self.assertEqual(fields["id"]["context"], "table")
+            self.assertEqual(fields["id"]["label"], "编号")
+            self.assertEqual(fields["name"]["context"], "table")
+            self.assertEqual(fields["name"]["label"], "姓名")
+
+
 if __name__ == "__main__":
     unittest.main()
