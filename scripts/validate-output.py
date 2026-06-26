@@ -162,6 +162,169 @@ _TOC_ANCHOR_RE = re.compile(r"^\s*-\s+\[[^\]]+\]\([^)]+\)", re.MULTILINE)
 #   1. The first task-card heading must be `### 任务卡 1: ...`
 #   2. Task-card numbers must be sequential (1, 2, 3, ...)
 #   3. There must be ≥ 1 task card (otherwise it's not a manual)
+_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+
+
+def _parse_frontmatter(text: str) -> dict:
+    """Return frontmatter keys/values as a dict (values trimmed + unquoted).
+
+    Returns {} when the file has no frontmatter. Used by the
+    description_required check (INTEGRATION.md §3.5: viewer v2 parses
+    frontmatter `description` for the search-result excerpt — a manual
+    without it gives empty search snippets, which the skill must not
+    ship).
+    """
+    m = _FRONTMATTER_RE.search(text)
+    if not m:
+        return {}
+    meta: dict[str, str] = {}
+    for line in m.group(1).splitlines():
+        if ":" not in line:
+            continue
+        k, _, v = line.partition(":")
+        meta[k.strip()] = v.strip().strip('"').strip("'")
+    return meta
+
+
+# v2.1.0: terms the LLM sometimes leaves as literal placeholder prose
+# when it copy-pastes the skill's own template text into the deliverable.
+# These never resolve to real content for a business user — `对应地址/`
+# opens nothing, `起静态站服务 8088` is a command's display-name stub
+# (not a runnable command). audience_leak §2.7.1 类 1/8 territory:
+# these are "how the manual was generated" residue, not operation steps.
+#
+# IMPORTANT: these three CJK tokens are scanned on RAW text (incl.
+# inside backticks). The ehr manual shipped them backtick-wrapped
+# (`对应地址/`, `手册所在目录/`, `起静态站服务`) which LOOKS like
+# code/paths but resolves to nothing — backticks mask empty prose,
+# the same trick §2.2 bans for alt text. A scan that strips code
+# first would miss every one of them. None of these tokens is ever a
+# valid literal value, so no real command collides.
+#
+# Each tuple: (regex, human reason). Match = unfilled template term.
+_UNFILLED_TERM_PATTERNS = [
+    # `对应地址` used as a literal URL/path component the user must open.
+    # Allow trailing `/` (e.g. `对应地址/`) and Chinese full-width slash.
+    (re.compile(r"对应地址(?![\w-])"), "未替换模板话术 「对应地址」(应为真实访问地址)"),
+    # `手册所在目录` used as a literal path the user must type/cd into.
+    (re.compile(r"手册所在目录"), "未替换模板话术 「手册所在目录」(应为真实目录路径)"),
+    # `起静态站服务` is the skill's own subcommand display-name; if it
+    # appears bare the agent pasted template text verbatim — the real
+    # command is `python3 -m http.server`. Scanned raw (incl. backticks).
+    (re.compile(r"起静态站服务"), "未替换模板话术 「起静态站服务」(子命令名当成命令,应为真实启动命令)"),
+    # Unfilled `<your-...>` placeholders that survived validate-config.
+    (re.compile(r"<your-[a-z-]+>"), "未替换占位符 <your-...>(validate-config 应已拦截)"),
+]
+
+
+def _check_unfilled_template_terms(text: str) -> dict:
+    """v2.1.0: catch template prose the LLM forgot to fill in.
+
+    Two classes, run on RAW text (not code-stripped):
+      - The three skill-internal stub tokens (`对应地址`, `手册所在目录`,
+        `起静态站服务` as a pseudo-command) are NEVER valid literal
+        values, even inside backticks. The ehr manual shipped them
+        backtick-wrapped (`` `对应地址/` ``) which looks "codey" but
+        resolves to nothing for a business user — backticks here mask
+        empty prose, exactly the §2.2 placeholder_alt failure mode. We
+        scan raw text so the backtick disguise does not hide them.
+       - `<your-...>` placeholders (validate-config residue) are also
+        scanned raw.
+
+    Real backtick commands that happen to be long/indented are fine —
+    none of them are these three literal CJK tokens.
+
+    Returns a check-shaped dict (threshold 0, ok iff no matches).
+    """
+    offenders: list[dict] = []
+    for pat, reason in _UNFILLED_TERM_PATTERNS:
+        for m in pat.finditer(text):
+            line = text[: m.start()].count("\n") + 1
+            offenders.append({"match": m.group(0), "reason": reason, "line": line})
+    return {
+        "name": "unfilled_template_terms (含未替换模板话术)",
+        "hits": len(offenders),
+        "threshold": 0,
+        "comparison": "eq",
+        "ok": (len(offenders) == 0),
+        "flagged": len(offenders),
+        "offenders": offenders[:5],
+    }
+
+
+def _check_frontmatter_description(text: str) -> dict:
+    """v2.1.0: INTEGRATION.md §3.5 says viewer v2 parses the frontmatter
+    `description` into the search-result excerpt. SKILL §3 row 1 now
+    lists it as required, but the LLM kept omitting it (the ehr manual
+    shipped three manuals with empty `description`, rendering viewer
+    search useless). This check FAILs any manual whose frontmatter is
+    missing `description` or has it empty/placeholder.
+
+    Tolerant parse (same shape as html._parse_frontmatter): non-empty
+    after stripping quotes counts as filled; `占位`/`<TODO:>`/`xxx`
+    stubs count as empty.
+    """
+    meta = _parse_frontmatter(text)
+    raw = meta.get("description", "").strip()
+    if raw and not re.fullmatch(r"(?:<TODO[:：][^>]*>|占位[:：]?|xxx|<[^>]+>)", raw, re.IGNORECASE):
+        return {
+            "name": "frontmatter_description (INTEGRATION §3.5 搜索摘要)",
+            "hits": 1,
+            "threshold": 1,
+            "comparison": "ge",
+            "ok": True,
+            "has_field": True,
+            "reason": "",
+        }
+    return {
+        "name": "frontmatter_description (INTEGRATION §3.5 搜索摘要)",
+        "hits": 0,
+        "threshold": 1,
+        "comparison": "ge",
+        "ok": False,
+        "has_field": bool(meta.get("description", "").strip()),
+        "reason": "frontmatter 缺 description 或为占位(viewer 搜索摘要会空)",
+    }
+
+
+# v2.2.0: a `#### 步骤` (or `### 步骤`) section must contain ONLY step
+# descriptions + `![alt](.png)` screenshots. Videos belong in a separate
+# `#### 演示视频` section placed BEFORE the steps (SKILL §4 / §2.6).
+# Permitting `[VIDEO:](.mp4)` inside the steps block led the LLM to
+# interleave videos into individual step lines, which made the viewer
+# render a video inline mid-prose and broke the "watch the demo, then
+# follow the steps" reading order. This check scans every steps block
+# delimited by a `步骤` heading up to the next heading (H2/H3/H4) or
+# EOF, and flags any `.mp4)` reference found within.
+_STEP_HEADING_RE = re.compile(r"^#{2,4}\s*步骤\s*$", re.MULTILINE)
+_HEADING_LINE_RE = re.compile(r"^#{2,4}\s+", re.MULTILINE)
+_MP4_LINK_RE = re.compile(r"\]\([^)]*\.mp4\)", re.IGNORECASE)
+
+
+def _check_video_outside_steps(text: str) -> dict:
+    """v2.2.0: every `#### 步骤` / `### 步骤` block must NOT contain a
+    `.mp4)` video reference (markdown link form `[VIDEO: x](path.mp4)`
+    or any `](...mp4)`). Videos belong in `#### 演示视频`, before steps.
+    """
+    offenders: list[dict] = []
+    for m in _STEP_HEADING_RE.finditer(text):
+        start = m.end()
+        nxt = _HEADING_LINE_RE.search(text, start)
+        block = text[start: nxt.start()] if nxt else text[start:]
+        for vm in _MP4_LINK_RE.finditer(block):
+            line = text[: m.start() + vm.start()].count("\n") + 1
+            offenders.append({"line": line, "match": vm.group(0)[:80]})
+    return {
+        "name": "video_outside_steps (§2.6 视频仅在演示视频段)",
+        "hits": len(offenders),
+        "threshold": 0,
+        "comparison": "eq",
+        "ok": (len(offenders) == 0),
+        "flagged": len(offenders),
+        "offenders": offenders[:5],
+    }
+
+
 _TASK_CARD_HEADING_RE = re.compile(r"^###\s+任务卡\s+(\d+):\s*(.+?)\s*$", re.MULTILINE)
 _ANY_H3_RE = re.compile(r"^###\s+(.+?)\s*$", re.MULTILINE)
 
@@ -317,6 +480,12 @@ def _check_audience_leak(text: str) -> dict:
 
     # Pattern 1: `> 数据源:` blockquote
     pat1 = re.compile(r"^>\s*数据源[:：].*$", re.MULTILINE)
+    # P0-1 (review fix): HTML-comment provenance annotations like
+    # `<!-- source: extract-X.py, file: Y -->` are the same kind of
+    # 创作痕迹 as `> 数据源:` blockquotes (§2.7.1 类 1) and also leak
+    # source file paths (类 3). §5.3 no longer instructs the LLM to
+    # add them inline, but guard so any survivors are flagged.
+    pat_source = re.compile(r"<!--\s*source\s*:\s*extract-", re.IGNORECASE)
     # Pattern 2: API endpoints (NOT routes, NOT images, NOT links).
     # Business users should never see backend endpoint paths
     # ANYWHERE in the manual — not in tables, not in bulleted lists,
@@ -410,6 +579,7 @@ def _check_audience_leak(text: str) -> dict:
 
     patterns = [
         (pat1, "数据源 元注释 (SKILL §2.7.1 类 1)"),
+        (pat_source, "HTML 源信息注释 <!-- (SKILL §2.7.1 类 1/3)"),
         (pat2, "后端 API 路径表 (SKILL §2.7.1 类 2)"),
         (pat3, "源码文件路径 (SKILL §2.7.1 类 3)"),
         (pat4, "仓库/目录结构列表 (SKILL §2.7.1 类 4)"),
@@ -737,6 +907,49 @@ def validate_file(path):
         "offenders": leak_check["offenders"],
     })
     all_ok = all_ok and leak_check["ok"]
+    # v2.1.0: INTEGRATION §3.5 — frontmatter `description` feeds the
+    # viewer search excerpt. Empty == useless search; FAIL. Runs on
+    # the raw text (frontmatter is at file top, not in any code fence).
+    desc_check = _check_frontmatter_description(text)
+    results.append({
+        "name": desc_check["name"],
+        "hits": desc_check["hits"],
+        "threshold": desc_check["threshold"],
+        "comparison": desc_check["comparison"],
+        "ok": desc_check["ok"],
+        "has_field": desc_check["has_field"],
+        "reason": desc_check.get("reason", ""),
+    })
+    all_ok = all_ok and desc_check["ok"]
+    # v2.1.0: unfilled template terms (`对应地址`, `手册所在目录`,
+    # `起静态站服务` as a pseudo-command — scanned RAW incl. backticks,
+    # because the ehr manual shipped them backtick-wrapped which masks
+    # empty prose; see _check_unfilled_template_terms for rationale).
+    term_check = _check_unfilled_template_terms(text)
+    results.append({
+        "name": term_check["name"],
+        "hits": term_check["hits"],
+        "threshold": term_check["threshold"],
+        "comparison": term_check["comparison"],
+        "ok": term_check["ok"],
+        "flagged": term_check["flagged"],
+        "offenders": term_check["offenders"],
+    })
+    all_ok = all_ok and term_check["ok"]
+    # v2.2.0: §2.6 — videos live in a `#### 演示视频` section before the
+    # steps, never inside `#### 步骤`. Catches the LLM habit of pasting
+    # `[VIDEO:](.mp4)` onto a step line.
+    vsteps_check = _check_video_outside_steps(text)
+    results.append({
+        "name": vsteps_check["name"],
+        "hits": vsteps_check["hits"],
+        "threshold": vsteps_check["threshold"],
+        "comparison": vsteps_check["comparison"],
+        "ok": vsteps_check["ok"],
+        "flagged": vsteps_check["flagged"],
+        "offenders": vsteps_check["offenders"],
+    })
+    all_ok = all_ok and vsteps_check["ok"]
     # v0.4.0: opt-in unique-content check. Pop a module-level flag
     # (set by main from --unique) so test harnesses can override.
     if globals().get("UNIQUE_CHECK_ENABLED"):

@@ -175,17 +175,25 @@ A: ...
 
 ### 2.6 视频与截图并行
 
-任务卡中**关键步骤**配视频,其他步骤配截图。
+**v2.2.0 硬门**:每个任务卡的录屏视频放在独立的 `#### 演示视频` 段,**位于 `#### 步骤` 之前**(紧跟在"操作前必看"块和 7 字段硬模板之后)。**步骤段(`#### 步骤` 内部)只放步骤说明 + `![alt](path.png)` 截图,禁止 `[VIDEO: x](path.mp4)`** —— `validate-output.py` 第 14 项 `video_outside_steps` 会卡这个。
 
 格式:
 ```markdown
-[VIDEO: <task>-<step>.mp4]  视频时长约 1 分钟,演示完整流程
-[SCREENSHOT: <task>-<step>.png]  静态截图,标注关键位置
+#### 演示视频
+
+[VIDEO: <task>-demo.mp4](<path>.mp4)  一段 1 分钟左右的演示
+
+#### 步骤
+
+1. <动词开头,≤ 30 字>![<口语化图说>](<step>.png)
+2. <动词开头,≤ 30 字>![<口语化图说>](<step>.png)
 ```
 
-缺视频时显式标 `[VIDEO NEEDED]`,缺截图时显式标 `[SCREENSHOT NEEDED]`,汇总到分册末尾"待补视频/截图清单"小节。
+**为什么放演示视频段、而不是塞到步骤里**:读者先看一段完整演示理解整个流程,再按步骤一步步跟做。视频塞进某一步会打断阅读节奏、还让 viewer 把视频渲染到段落中间,view 在屏幕中央贴一行 `<video>` 卡片,体感奇怪。
 
-**视频支持是 frontmatter 预留,viewer v2 渲染。v1 viewer 不解析 VIDEO 标签,直接显示为文本占位**。
+缺视频时(没录过或录失败)不写 `#### 演示视频` 段即可,不必留 `[VIDEO NEEDED]` 占位 —— `validate-output.py` 已经把"步骤段内出现 `.mp4)` 引用"判 FAIL,所以这一步要改就改对,占位符混进去比"不录"更糟。截图同理:步骤段里出现 `[SCREENSHOT:` 占位也会被 `screenshot files exist` 检查抓。
+
+**视频由 viewer 渲染**:`[VIDEO: title](path.mp4)` 在 viewer(`templates/user-manual.html`,dashboard v25)中被 `convertVideoLinksInMd` 转成可播放的 `<video controls>` 卡片,详见 §8。frontmatter 的 `narration` 是录屏配音输入(§2.6.1),与 viewer 渲染是两条独立链路。
 
 ### 2.7 视觉锚点词汇表(任务卡内固定使用)
 
@@ -202,7 +210,7 @@ A: ...
 
 > 业务用户(运营 / 专员 / 主管 / 审批人 / 外部协作方)读这份手册时,看到的应该是**操作内容**,不是**生成过程**也不是**开发信息**。
 > 任何让用户看到"这文档是怎么写出来的"或"代码长什么样"的内容都属于创作痕迹,**禁止写入**。
-> 规则不能靠"换措辞绕开"——下表是**模式**匹配(代码 + 含义),LLM 不能用同义词 / 缩写 / 上下文跳转 / 中文转英文来绕过。`validate-output.py` §verification-8 强制执行。
+> 规则不能靠"换措辞绕开"——下表是**模式**匹配(代码 + 含义),LLM 不能用同义词 / 缩写 / 上下文跳转 / 中文转英文来绕过。类 1/2/3/4/5/7 由 `validate-output.py` 的 `audience_leak` 检查(§verification-8)硬强制;类 6(事实性禁估算)与类 7a(术语必译)是**软约束**,validator 不卡(详见各类尾部标注)。
 
 **6 类禁列项**:
 
@@ -242,7 +250,7 @@ A: ...
    - ❌ 凭印象写"支持 3 种筛选",实际有 6 种
    - ✅ 改用:用 §5.1 列出的 5 个 extract helper 抽(`extract-tasks` / `extract-fields` / `extract-routes` / `extract-roles` / `extract-openapi`),数字和列表必须从代码读。
    - ✅ Tier 3(LLM-only mode)例外:helper 不可用时,在手册末尾用 1 行 `[LLM-ESTIMATED]` 标注哪些内容是估算的(让用户知道可信度)。
-   - ⚠️ **本类由 LLM 行为规范保证**,不由 `validate-output.py` 强制(因为没有可靠的模式匹配)。CI / 抽检 / peer review 应作为兜底。
+   - ⚠️ **本类是软约束**:无可靠模式匹配,`validate-output.py` 不强制。靠 LLM 行为规范 + 人工审查 / CI 抽检兜底。建议在不放心的数字处落地一个确定性交叉校验(错误码表 ↔ `extract-roles` 输出、筛选项数 ↔ `extract-fields` 输出)。
 
 7a. **业务概念术语必译(v1.1.3 新增)** — 业务用户手册面向**业务用户**(运营 / 专员 / 主管),不面向开发者。文档中**所有业务概念性质的英文术语必须译为中文**;**代码标识符 / 函数名 / API endpoint / 后端类名保留英文**(因为翻译就找不到了)。
 
@@ -272,7 +280,7 @@ A: ...
      - 后端类名(对用户无意义):`ReportQueryGuard` / `ErrorCode` / `ReportConfigController` 等 → 删
      - 后端文件名:`ErrorCode.java` / `ReportConfigController.java` 等 → 删
      - 已在类 3(源码路径)覆盖
-   - ⚠️ **本类由 LLM 行为规范 + 人工审查保证**,不由 `validate-output.py` 强制(因为"业务概念"vs"代码标识符"是语义判断,模式识别误伤率高)。
+   - ⚠️ **本类是软约束**(语义判断、模式匹配误伤率高),`validate-output.py` 不强制,靠 LLM 行为规范 + 人工审查。
 
 7. **架构 / 部署信息禁列(v1.1.2 新增)** — 业务用户进手册是来"做操作"的,不是来"看架构图 / 部署拓扑"的。这类信息对**开发 / 运维**有用,对业务用户没有应用价值。
    - ❌ 后端 URL / 端口号:`http://localhost:9001/`、`http://api.example.com/v2`
@@ -506,7 +514,7 @@ narration_rate: "+0%"  # 可选,语速调节
 
 | # | 章节 | 内容 | 自动 / LLM |
 |---|---|---|---|
-| 1 | 封面信息(frontmatter) | title / module / module_code / version / version_date / audience / task / prerequisites / related | LLM |
+| 1 | 封面信息(frontmatter) | title / module / module_code / **description** / version / version_date / audience / task / prerequisites / related | LLM |
 | 2 | 文档说明 | 本分册面向谁、范围、不包含什么、与其他分册的关系 | LLM |
 | 3 | **读法指南** | 本分册怎么读、各章节定位、视觉锚点说明、Q&A 怎么用 | LLM |
 | 4 | 目录 | **v1.0.1 (硬门):** 写完 §2-§9 之后, **立刻回头** 用 `## 目录` 段把 5-10 个 H2/H3 标题列成 `[<标题>](#<anchor>)` 链接(an anchor 形式)。**禁止** 留 `<!-- toc -->` 占位 / 留空 / 只写"见右侧"。`validate-output.py` 9th check 会强制: `## 目录` 段后必须有 ≥ 5 行 `- [` 链接,否则整本 FAIL。**为什么硬门:** 之前的 v0.5.2 规则被 LLM 反复忽略,viewer 左侧导航就空了,用户读不到结构。例:<br>`## 目录`<br>`- [文档说明](#文档说明)`<br>`- [读法指南](#读法指南)`<br>`- [任务卡 1:登录](#任务卡-1登录)`<br>`- [任务卡 2:切换分册](#任务卡-2切换分册)`<br>`- [常见问题](#常见问题)` | LLM |
@@ -540,6 +548,12 @@ narration_rate: "+0%"  # 可选,语速调节
 > | 6 | `screenshot count` | 含 `![alt](path.png)` / `![alt](path.jpg)` 链接次数 | ≥ 2 |
 > | 7 | `screenshot files exist` | **每条** `![alt](path.png)` 对应文件 ≥ 50×50 px（**不**是 1×1 占位）+ 文本里没有未替换的 `[SCREENSHOT: x]` / `[VIDEO: x]` 占位 | 全部 |
 | 8 (v0.4.0, opt-in) | `screenshot unique` | 所有引用 PNG 的 SHA256 中,没有 2+ 不同文件名指向同一 hash(防 recorder 重复截图) | 全部(传 `--unique` 才检查) |
+> | 9 (v1.0.1) | `directory_anchors` | `## 目录` 段后 ≥ 5 行 `- [标题](#锚)` 链接 | ≥ 5 |
+> | 10 (v1.0.1) | `task_card_headings` | 所有 `### 任务卡 N: ...` 编号从 1 起连续无跳号 | 连续 |
+> | 11 (v1.1.0) | `audience_leak` | 业务用户文档不含数据源/API路径/源码路径/仓库树/录屏占位/后端URL端口/技术栈版本 | 0 |
+> | 12 (v2.1.0) | `frontmatter_description` | frontmatter 含非空非占位 `description`(viewer 搜索摘要靠它) | ≥ 1 |
+> | 13 (v2.1.0) | `unfilled_template_terms` | 正文 / 反引号里都没有 `对应地址` / `手册所在目录` / `起静态站服务`(子命令名当命令) / `<your-...>` 这类未替换模板话术 | 0 |
+> | 14 (v2.2.0) | `video_outside_steps` | `#### 步骤` 段内**禁止**出现 `.mp4` 引用(视频必须在 `#### 演示视频` 段,放在步骤前) | 0 |
 >
 > **LLM 写作 checklist**（写完一张卡就 grep 一遍）：
 > - [ ] 这张卡 7 字段全（适用角色 / 前置条件 / 操作前必看 / 步骤 / 成功后看到 / 字段说明 / 如果你卡住了 / 相关任务）
@@ -571,10 +585,22 @@ python3 scripts/validate-output.py docs/user-manual/manual/<name>.md --strict
 **前置条件**:<bullet 列表,从 prerequisites 派生>
 **入口**:`<path>`,对应后端 `<api_path>`
 
+#### 演示视频
+
+> 💡 **本段在 `#### 步骤` 之前**(v2.2.0 硬门)。任务卡若配套录屏视频,
+> 放在这个独立 `#### 演示视频` 段里,跟"操作前必看"块前后相邻。
+> **步骤段内禁止视频**(`[VIDEO: x](path.mp4)` 不能出现在 `#### 步骤` 里)
+> —— 步骤段只放步骤说明 + `![alt](path.png)` 截图。理由:读者期望先看一段
+> 完整演示理解全流程,再按步骤一步步跟做;视频塞进某一步会打断节奏。
+> 缺视频时不写本段即可;`validate-output.py` 第 14 项硬门会卡"步骤段
+> 出现 .mp4 引用"。
+
+[VIDEO: <task>-demo.mp4](path/to/<task>-demo.mp4)  一段 1 分钟左右的演示
+
 #### 步骤
 
-1. <动词开头,≤ 30 字>[SCREENSHOT: <name>.png]
-2. <动词开头,≤ 30 字>[SCREENSHOT: <name>.png]
+1. <动词开头,≤ 30 字>![<口语化图说>](path/to/<step>.png)
+2. <动词开头,≤ 30 字>![<口语化图说>](path/to/<step>.png)
 3. <动词开头,≤ 30 字>
 
 #### 成功后看到
@@ -625,6 +651,7 @@ python3 scripts/extract-tasks.py docs/superpowers/specs/*.md > /tmp/tasks.json
 # 5.1.2 抽表单字段(覆盖所有 .vue 页面 + 后端 DTO)
 python3 scripts/extract-fields.py <frontend_root>/src/views > /tmp/fields.json
 python3 scripts/extract-fields.py --java <backend_root>/**/dto > /tmp/fields-java.json
+#   ⚠️ `**` 依赖 shell globstar:bash 需 `shopt -s globstar`(zsh 默认开,POSIX sh 不支持)。拿不到文件时改在 Python 里 `Path(backend_root).rglob("**/dto")`(或 `shopt -s globstar` 后再跑)。下同 `--java <...>/**/*`。
 
 # 5.1.3 抽路由(知道有哪些页面)
 python3 scripts/extract-routes.py <frontend_root>/src/router/index.ts > /tmp/routes.json
@@ -673,7 +700,7 @@ python3 scripts/extract-openapi.py openapi.yaml > /tmp/openapi.json
 4. 视觉锚点用 4 种:`> ⚠️ 注意:` / `> 💡 提示:` / `> ❌ 禁止:` / `> 📌 备注:`,每分册 ≥ 3 处
 5. 故障速查按 4 类(权限 / 网络 / 数据 / 操作),附录 A 错误码 6 列硬结构
 6. 字段说明用用户视角语言,不要照搬 Java 字段名或 DTO 注解
-7. 引用数据时加 `<!-- source: extract-X.py, file: Y -->` 注释(便于追溯)
+7. 产物**内部可追溯、对用户不可见**:抽取来的数据若需标注出处,**仅写入 Citations 表**(且仅当 `manual-config.json: include_citations: true` 时才生成该表)。**禁止**在正文 / 任务卡 / `![]()` / Q&A 里散落任何 `<!-- source: ... -->` 或 `> 数据源:` 这类元注释——它们属于 §2.7.1 类 1(创作痕迹)与类 3(源码路径)的禁列项。未开 Citations 时就不标注,追溯靠 `extract-*.json` 与 commit 历史。
 
 ## 禁止
 - 不要用开发者术语(mvn / POST / 8089 / etc.),读 manual-config.json 取部署信息
@@ -684,7 +711,8 @@ python3 scripts/extract-openapi.py openapi.yaml > /tmp/openapi.json
 ## 输出格式
 - 1 个 markdown 文件
 - 文件名:`<module>-user-manual.md`
-- 文件开头 frontmatter:title / module / module_code / version / version_date / audience / task / prerequisites / related
+- 文件开头 frontmatter:title / module / module_code / **description** / version / version_date / audience / task / prerequisites / related
+- **`description` 必填且非空**(v2.1.0 硬门):INTEGRATION §3.5 viewer v2 解析此字段做搜索结果摘要。空字符串 / `占位` / `<TODO:>` / `<your-...>` → `validate-output.py` FAIL。写一到两句话:本册面向谁、做什么。**不要**写"详细见正文"这类无信息量摘要。
 ```
 
 ### 5.4 Output validation(必跑,通过才能 commit)
@@ -776,7 +804,7 @@ python3 -m manual_helper fill-citation-shas docs/user-manual/manual/<name>.md
 
 ## 7. Helper 子命令
 
-所有 helper 入口在 `scripts/manual_helper.py`,从项目根目录运行:
+所有 helper 入口在 `scripts/manual_helper/`(Python 包,v2.0.0 起由单文件 `manual_helper.py` 拆分而来)。**运行方式**:`cd scripts && python3 -m manual_helper <子命令> ...`,或 `PYTHONPATH=scripts python3 -m manual_helper <子命令> ...`。直接在项目根目录跑 `python3 -m manual_helper` 会报 `No module named manual_helper`——模块在 `scripts/` 下,需把它加入 `PYTHONPATH`。
 
 | 子命令 | 用途 |
 |---|---|
@@ -806,6 +834,7 @@ python3 -m manual_helper fill-citation-shas docs/user-manual/manual/<name>.md
 | **`init-db`** | 应用 schema.sql 到 Postgres(idempotent) |
 | **`upsert-manual <md-path>`** | POST markdown + frontmatter 到 API(db 模式) |
 | **`upload-asset <manual-file> <asset-path>`** | 上传二进制到 S3/MinIO,注册到 `manual_assets` |
+| **`prune-silent-backups <screenshots-dir> [--manual <md>...] [--apply]`** | v2.1.0: 删除 recorder 录制后遗留的 `.silent.mp4` 备份(其有声版被 manual 引用才算可删)。默认 dry-run 只报告,`--apply` 写盘。不传 `--manual` 自动发现 `<screenshots-dir>/../manual/*.md` |
 
 ## 8. HTML viewer
 
@@ -930,6 +959,8 @@ mode to use, with a default of "record":
 > `skip` and shipped 100% broken image refs. v1.0.0 removes the
 > option entirely. If the recording phase cannot run, fix the
 > environment and re-run; do not deliver a draft.
+>
+> **评审 / 审计场景的降级(仅限非交付用途)**:当目标只是给人**评审手册结构 / 文案**(不交付给最终业务用户)、dev server 又无法在当前 sandbox 起来时,可临时把分册在 frontmatter 标 `status: draft-for-review`,并在含估算数字的章节末用 §2.7.1 类 6 的 `[LLM-ESTIMATED]` 标注。此标记**不**解除 §14 对最终交付物的硬约束;一旦要交付,必须回到 `record` / `screenshot-only` 模式补齐资产、去掉草稿标记。
 
 ### Workflow (mode = `record` or `screenshot-only`)
 
@@ -950,6 +981,16 @@ mode to use, with a default of "record":
    )
    Path("recorder-script.json").write_text(json.dumps(template, indent=2))
    # → the agent fills in TODO selectors / click sequences
+
+   v2.1.0: 录制视口由 `build_recorder_template` 从 `manual-config.json` 的
+   `recording.viewport: {width, height}` 读取;未配置时默认 **1920×1080**
+   (进 desktop 全屏录制,不再用旧的 1440×900)。想让视频匹配发行业务用户的
+   真实屏幕分辨率,就在 manual-config.json 写:
+   ```json
+   { "recording": { "viewport": { "width": 2560, "height": 1600 } } }
+   ```
+   (以固定大视口 headless 录制为准 —— deterministic、可 CI 重复;recorder 不开
+   headed 真窗口全屏,那种被前台切走会黑屏。)
 
 3. LLM agent invokes the recorder skill (separate CLI, NOT in manual_helper):
    python3 -m recorder_plugin.cli run recorder-script.json

@@ -19,6 +19,12 @@ def run(args, stdin=None):
 
 
 GOOD = """\
+---
+title: 测试手册
+module: 测试
+description: 测试手册搜索摘要 — 描述本册面向谁、做什么
+---
+
 # Test manual
 
 ## 适用角色
@@ -171,7 +177,10 @@ class ValidateOutputTests(unittest.TestCase):
             # v1.0.1: 9 checks now (added directory_anchors).
             # v1.0.1: 10 checks now (added task_card_headings).
             # v1.1.0: 11 checks now (added audience_leak per SKILL §2.7.1).
-            self.assertEqual(len(data[0]["checks"]), 11)
+            # v1.2.0: 13 checks now (added frontmatter_description +
+            # unfilled_template_terms).
+            # v2.2.0: 14 checks now (added video_outside_steps).
+            self.assertEqual(len(data[0]["checks"]), 14)
             names = [c["name"] for c in data[0]["checks"]]
             self.assertIn("screenshot files exist", names)
         finally:
@@ -783,6 +792,212 @@ class ScreenshotUniqueTests(unittest.TestCase):
             # 0 unique hashes, 0 duplicates, ok=True
             self.assertTrue(check["ok"])
             self.assertEqual(check["unique_hashes"], 0)
+
+
+def _doc_with_frontmatter(description: str = "", body: str = "") -> str:
+    fm = "---\ntitle: T\nmodule: m\n"
+    if description is not None:
+        fm += f"description: {description}\n"
+    fm += "---\n\n"
+    return fm + body + "\n"
+
+
+class FrontmatterDescriptionTests(unittest.TestCase):
+    """v1.2.0: frontmatter `description` is required + non-empty
+    (INTEGRATION §3.5 viewer search excerpt)."""
+
+    def _desc_check(self, text: str) -> dict:
+        r = run(["--json", "-"])
+        # write to a temp file (validate_file needs a path; frontmatter
+        # check does not touch the filesystem, so path is nominal)
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write(text)
+            path = f.name
+        try:
+            data = json.loads(run(["--json", path]).stdout)
+        finally:
+            os.unlink(path)
+        return next(c for c in data[0]["checks"]
+                   if c["name"].startswith("frontmatter_description"))
+
+    def test_filled_description_passes(self):
+        c = self._desc_check(_doc_with_frontmatter(
+            description="本册面向报表配置员,讲怎么新建和发布报表"))
+        self.assertTrue(c["ok"])
+        self.assertTrue(c["has_field"])
+
+    def test_missing_description_fails(self):
+        text = "---\ntitle: T\nmodule: m\n---\n\n# hi\n"
+        c = self._desc_check(text)
+        self.assertFalse(c["ok"])
+        self.assertFalse(c["has_field"])
+
+    def test_empty_description_fails(self):
+        c = self._desc_check(_doc_with_frontmatter(description="", body="# hi"))
+        self.assertFalse(c["ok"])
+
+    def test_placeholder_description_fails(self):
+        for stub in ("占位", "<TODO: fill>", "xxx", "<your-desc>"):
+            c = self._desc_check(_doc_with_frontmatter(description=stub))
+            self.assertFalse(c["ok"], msg=f"stub {stub!r} should FAIL")
+
+
+class UnfilledTemplateTermsTests(unittest.TestCase):
+    """v1.2.0: catch template prose the LLM left literal in the
+    deliverable (`对应地址`, `手册所在目录`, `起静态站服务` as a
+    pseudo-command). Real backtick commands must NOT trip it."""
+
+    def _term_check(self, body: str) -> dict:
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write(_doc_with_frontmatter("ok desc", body))
+            path = f.name
+        try:
+            data = json.loads(run(["--json", path]).stdout)
+        finally:
+            os.unlink(path)
+        return next(c for c in data[0]["checks"]
+                   if c["name"].startswith("unfilled_template_terms"))
+
+    def test_clean_text_passes(self):
+        c = self._term_check("打开 http://localhost:8088/ 进入系统。")
+        self.assertTrue(c["ok"], msg=str(c))
+
+    def test_real_command_not_stub_not_flagged(self):
+        # The REAL command the stub stands for is fine:
+        c = self._term_check("运行 `python3 -m http.server 8088` 然后开浏览器。")
+        self.assertTrue(c["ok"], msg=str(c))
+
+    def test_stub_token_in_backticks_STILL_flagged(self):
+        # v1.2.0 design: these three stubs are NEVER valid literals,
+        # even inside backticks. The ehr manual shipped them
+        # backtick-wrapped to disguise empty prose — raw scan must
+        # catch them so the disguise does not work.
+        c = self._term_check("浏览器开 `对应地址/user-manual.html`")
+        self.assertFalse(c["ok"], msg=f"backtick-wrapped stub must still FAIL: {c}")
+        c = self._term_check("在 `起静态站服务 8088` 里跑。")
+        self.assertFalse(c["ok"], msg=str(c))
+        c = self._term_check("进入 `手册所在目录/` 目录。")
+        self.assertFalse(c["ok"], msg=str(c))
+
+    def test_bare_对应地址_flagged(self):
+        c = self._term_check("浏览器开 对应地址/user-manual.html")
+        self.assertFalse(c["ok"], msg=str(c))
+        offenders = " ".join(o["match"] for o in c["offenders"])
+        self.assertIn("对应地址", offenders)
+
+    def test_bare_手册所在目录_flagged(self):
+        c = self._term_check("server 起在 手册所在目录/ 根目录")
+        self.assertFalse(c["ok"], msg=str(c))
+
+    def test_bare_起静态站服务_in_prose_flagged(self):
+        c = self._term_check("跑 起静态站服务 8088 即可。")
+        self.assertFalse(c["ok"], msg=str(c))
+
+    def test_your_placeholder_flagged(self):
+        c = self._term_check("地址见 <your-default-url>。")
+        self.assertFalse(c["ok"], msg=str(c))
+
+    def test_real_default_url_not_flagged(self):
+        # The known user-facing default URL (INTEGRATION ships this
+        # literal) must NOT trip the term check.
+        c = self._term_check("打开 http://localhost:8088/ 进入系统。")
+        self.assertTrue(c["ok"], msg=str(c))
+
+
+def _md_with_card(steps_body: str, demo_video: str = "") -> str:
+    """Build a minimal doc with one task card. `demo_video` becomes a
+    `#### 演示视频` block placed before `#### 步骤`. `steps_body` is
+    the literal text of the `#### 步骤` block (no leading heading)."""
+    demo = (
+        f"\n#### 演示视频\n\n{demo_video}\n\n"
+        if demo_video else ""
+    )
+    return f"""---
+title: T
+module: m
+description: ok
+---
+
+### 任务卡 1: 测试任务卡
+
+> ⚠️ **操作前必看**
+> - 注意
+
+**适用角色**: admin
+**前置条件**: x
+{demo}#### 步骤
+
+{steps_body}
+
+#### 成功后看到
+
+- ok
+
+#### 字段说明
+
+- x
+
+#### 如果你卡住了
+
+- x
+
+#### 相关任务
+
+- x
+"""
+
+
+class VideoOutsideStepsTests(unittest.TestCase):
+    """v2.2.0: §2.6 — videos live in a `#### 演示视频` section before
+    `#### 步骤`. The `#### 步骤` block must contain zero `.mp4)`
+    references. Catches the LLM habit of pasting `[VIDEO:](path.mp4)`
+    onto a step line."""
+
+    def _vs_check(self, text: str) -> dict:
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write(text)
+            path = f.name
+        try:
+            data = json.loads(run(["--json", path]).stdout)
+        finally:
+            os.unlink(path)
+        return next(c for c in data[0]["checks"]
+                   if c["name"].startswith("video_outside_steps"))
+
+    def test_video_in_demo_section_passes(self):
+        body = "1. 打开页面![x](a.png)\n2. 点按钮![y](b.png)\n"
+        demo = "[VIDEO: 演示](flow.mp4)"
+        c = self._vs_check(_md_with_card(body, demo))
+        self.assertTrue(c["ok"], msg=str(c))
+        self.assertEqual(c["flagged"], 0)
+
+    def test_video_inside_steps_fails(self):
+        # The bad pattern observed in the ehr manual: LLM pasted the
+        # video inline on a step line.
+        body = "1. 打开页面![x](a.png)\n2. 点按钮 [VIDEO: 演示](flow.mp4)\n3. 完成![y](c.png)\n"
+        c = self._vs_check(_md_with_card(body))
+        self.assertFalse(c["ok"], msg=str(c))
+        self.assertGreaterEqual(c["flagged"], 1)
+        self.assertIn("flow.mp4", c["offenders"][0]["match"])
+
+    def test_steps_without_video_passes(self):
+        body = "1. 打开页面![x](a.png)\n2. 点按钮![y](b.png)\n"
+        c = self._vs_check(_md_with_card(body))
+        self.assertTrue(c["ok"], msg=str(c))
+
+    def test_video_after_steps_passes(self):
+        # The step block is delimited by the next heading, so a video
+        # placed under `#### 成功后看到` is OUTSIDE the steps block.
+        # (Allowed by the rule — section after steps. The check only
+        # forbids videos INSIDE the steps block.)
+        body = "1. 打开页面![x](a.png)\n2. 点按钮![y](b.png)\n"
+        text = _md_with_card(body)
+        text = text.replace(
+            "#### 成功后看到\n\n- ok",
+            "#### 成功后看到\n\n[VIDEO: 回放](replay.mp4)\n\n- ok",
+        )
+        c = self._vs_check(text)
+        self.assertTrue(c["ok"], msg=str(c))
 
 
 if __name__ == "__main__":

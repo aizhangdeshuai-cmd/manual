@@ -33,6 +33,7 @@ _recording = _load_submodule("recording")
 # Re-bind names cli.main() actually uses. Doing it explicitly (vs.
 # `from . import *`) keeps lint and tracebacks friendly.
 init = _init_mod.init
+RecordingBlockedError = _init_mod.RecordingBlockedError
 init_skill = _init_mod.init_skill
 _detect_project_layout = _init_mod._detect_project_layout
 check_recording_readiness = _readiness.check_recording_readiness
@@ -56,6 +57,7 @@ cmd_read_config = _db.cmd_read_config
 cmd_init_db = _db.cmd_init_db
 cmd_upsert_manual = _db.cmd_upsert_manual
 cmd_upload_asset = _db.cmd_upload_asset
+prune_silent_backups = _recording.prune_silent_backups
 
 
 def main(argv: list[str]) -> int:
@@ -152,7 +154,12 @@ def main(argv: list[str]) -> int:
         return 0
 
     if cmd == "check-recording-readiness":
-        proj_root = Path(argv[2]) if len(argv) == 3 else Path.cwd()
+        # parse the positional project root (skip flags like --json);
+        # the old len(argv)==3 guard ignored an explicitly-passed
+        # root whenever any flag (e.g. --json) was present and fell
+        # back to cwd, which silently checked the wrong project.
+        _pos = [a for a in argv[2:] if not a.startswith("--")]
+        proj_root = Path(_pos[0]) if _pos else Path.cwd()
         readiness = check_recording_readiness(proj_root)
         if "--json" in argv:
             print(json.dumps(readiness, ensure_ascii=False, indent=2))
@@ -342,6 +349,50 @@ def main(argv: list[str]) -> int:
     if cmd == "upload-asset":
         rc = cmd_upload_asset(argv[2:])
         return rc if rc is not None else 0
+
+    if cmd == "prune-silent-backups":
+        # v1.2.0: delete recorder `.silent.mp4` backups whose narrated
+        # sibling is referenced by a manual. Default = dry-run (report
+        # only); pass --apply to actually unlink. Pass --manual <path>
+        # one+ times to scope which manuals drive "in use" (default:
+        # # auto-discover <screenshots-dir>/../manual/*.md).
+        positionals = [a for a in argv[2:] if not a.startswith("--")]
+        apply_flag = "--apply" in argv
+        manual_args: list[str] = []
+        i = 2
+        while i < len(argv):
+            if argv[i] == "--manual" and i + 1 < len(argv):
+                manual_args.append(argv[i + 1])
+                i += 2
+                continue
+            i += 1
+        if not positionals:
+            print(
+                "usage: manual_helper.py prune-silent-backups <screenshots-dir> "
+                "[--manual <md-path>...] [--apply]",
+                file=sys.stderr,
+            )
+            return 2
+        shots = Path(positionals[0])
+        if not manual_args:
+            auto_dir = shots.parent / "manual"
+            manual_args = sorted(str(p) for p in auto_dir.glob("*.md")) if auto_dir.is_dir() else []
+        report = prune_silent_backups(shots, [Path(m) for m in manual_args], apply=apply_flag)
+        import json as _json
+        print(_json.dumps(report, ensure_ascii=False, indent=2))
+        if not apply_flag and report["prunable"]:
+            print(
+                f"\n(dry-run) {len(report['prunable'])} prunable, "
+                f"{len(report['keep_orphan'])} kept. Re-run with --apply to delete.",
+                file=sys.stderr,
+            )
+        elif apply_flag:
+            print(
+                f"\n(deleted {len(report['deleted'])} files, "
+                f"{report['bytes_freed']} bytes)",
+                file=sys.stderr,
+            )
+        return 0
 
     print(f"unknown subcommand: {cmd}", file=sys.stderr)
     print(__doc__, file=sys.stderr)

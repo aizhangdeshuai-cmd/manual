@@ -194,6 +194,43 @@ class BuildRecorderTemplateV2Tests(unittest.TestCase):
         # Generic / too-short -> AUTH_ fallback
         self.assertEqual(_infer_auth_env_name("x", "USER"), "AUTH_USER")
 
+    def test_viewport_default_is_full_screen(self):
+        """v2.1.0: without an explicit recording.viewport, the recorder
+        template defaults to 1920x1080 (was 1440x900), so videos are no
+        longer letterboxed small-ish captures."""
+        from manual_helper import build_recorder_template
+        t = build_recorder_template("test-manual", [])
+        self.assertEqual(t["viewport"], {"width": 1920, "height": 1080})
+
+    def test_viewport_read_from_config(self):
+        """v2.1.0: manual-config.json `recording.viewport` overrides the
+        default, so a project can record at its real operator screen."""
+        with tempfile.TemporaryDirectory() as d:
+            proj = Path(d)
+            (proj / "docs" / "user-manual").mkdir(parents=True)
+            (proj / "docs" / "user-manual" / "manual-config.json").write_text(
+                json.dumps({"project": {"name": "P", "host": "localhost", "port": 8080},
+                            "recording": {"viewport": {"width": 2560, "height": 1600}}})
+            )
+            from manual_helper import build_recorder_template, _infer_viewport
+            self.assertEqual(_infer_viewport({"recording": {"viewport": {"width": 2560, "height": 1600}}}),
+                             {"width": 2560, "height": 1600})
+            manual = proj / "docs" / "user-manual" / "manual" / "lg-user-manual.md"
+            manual.parent.mkdir(parents=True, exist_ok=True)
+            manual.write_text("# Manual\n")
+            t = build_recorder_template("lg-user-manual", [],
+                                        manual_path=manual, project_root=proj)
+            self.assertEqual(t["viewport"], {"width": 2560, "height": 1600})
+
+    def test_viewport_ignores_garbage(self):
+        """v2.1.0: non-positive / non-int viewport falls back to default."""
+        from manual_helper import _infer_viewport
+        self.assertEqual(_infer_viewport({"recording": {"viewport": {"width": 0, "height": 100}}}),
+                         {"width": 1920, "height": 1080})
+        self.assertEqual(_infer_viewport({"recording": {"viewport": {"width": "wide", "height": 900}}}),
+                         {"width": 1920, "height": 1080})
+        self.assertEqual(_infer_viewport({}), {"width": 1920, "height": 1080})
+
 class DiffArtifactsGuardsTests(unittest.TestCase):
     """P7: diff-artifacts should fail loud on missing inputs (violates
     §12 fail loud otherwise — empty buckets + exit 0 masks LLM path
@@ -381,3 +418,104 @@ class InitSkillAutoRegenTests(unittest.TestCase):
             self.assertNotIn("viewer: regenerated", r.stderr)
             self.assertNotIn("viewer: created", r.stderr)
 
+
+
+class PruneSilentBackupsTests(unittest.TestCase):
+    """v1.2.0: prune_silent_backups deletes recorder `.silent.mp4`
+    backups whose narrated sibling is referenced by a manual. Default
+    dry-run; --apply writes to disk. Orphans (no narrated sibling in
+    use) are kept, never auto-deleted."""
+
+    def _tree(self, d):
+        sh = Path(d) / "screenshots"
+        manual = Path(d) / "manual"
+        sh.mkdir()
+        manual.mkdir()
+        return sh, manual
+
+    def _mp4(self, path, size=1024):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"\x00" * size)
+
+    def _md(self, manual_dir, name, refs):
+        p = Path(manual_dir) / name
+        body = "# m\n\ndescription: x\n\n# t\n"
+        for r in refs:
+            body += f"![x](../screenshots/{r})\n"
+        p.write_text(body)
+        return p
+
+    def test_dry_run_reports_but_does_not_delete(self):
+        with tempfile.TemporaryDirectory() as d:
+            sh, manual = self._tree(d)
+            self._mp4(sh / "flow" / "flow.mp4")
+            self._mp4(sh / "flow" / "flow.silent.mp4")
+            self._md(manual, "a.md", ["flow/flow.mp4"])
+            import manual_helper.recording as rec
+            report = rec.prune_silent_backups(sh, [manual / "a.md"], apply=False)
+            prunable_names = [Path(p).name for p in report["prunable"]]
+            self.assertIn("flow.silent.mp4", prunable_names)
+            self.assertEqual(report["deleted"], [])
+            # file still on disk
+            self.assertTrue((sh / "flow" / "flow.silent.mp4").exists())
+
+    def test_apply_deletes_referenced_silent_keeps_narrated(self):
+        with tempfile.TemporaryDirectory() as d:
+            sh, manual = self._tree(d)
+            self._mp4(sh / "flow" / "flow.mp4", 500)
+            self._mp4(sh / "flow" / "flow.silent.mp4", 300)
+            self._md(manual, "a.md", ["flow/flow.mp4"])
+            import manual_helper.recording as rec
+            report = rec.prune_silent_backups(sh, [manual / "a.md"], apply=True)
+            self.assertEqual(len(report["deleted"]), 1)
+            self.assertEqual(report["bytes_freed"], 300)
+            self.assertFalse((sh / "flow" / "flow.silent.mp4").exists())
+            self.assertTrue((sh / "flow" / "flow.mp4").exists())
+
+    def test_orphan_silent_kept_when_narrated_missing(self):
+        with tempfile.TemporaryDirectory() as d:
+            sh, manual = self._tree(d)
+            # Only the silent copy exists (narrated never produced)
+            self._mp4(sh / "flow" / "flow.silent.mp4")
+            self._md(manual, "a.md", ["flow/flow.mp4"])
+            import manual_helper.recording as rec
+            report = rec.prune_silent_backups(sh, [manual / "a.md"], apply=True)
+            self.assertEqual(report["prunable"], [])
+            self.assertEqual(len(report["keep_orphan"]), 1)
+            self.assertTrue((sh / "flow" / "flow.silent.mp4").exists())
+
+    def test_silent_kept_when_narrated_not_referenced(self):
+        with tempfile.TemporaryDirectory() as d:
+            sh, manual = self._tree(d)
+            self._mp4(sh / "flow" / "flow.mp4")
+            self._mp4(sh / "flow" / "flow.silent.mp4")
+            # manual references a DIFFERENT mp4, not flow.mp4
+            self._mp4(sh / "other" / "other.mp4")
+            self._md(manual, "a.md", ["other/other.mp4"])
+            import manual_helper.recording as rec
+            report = rec.prune_silent_backups(sh, [manual / "a.md"], apply=True)
+            self.assertEqual(report["prunable"], [])
+            self.assertEqual(len(report["keep_orphan"]), 1)
+            self.assertTrue((sh / "flow" / "flow.silent.mp4").exists())
+
+    def test_cli_auto_discovers_manual_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            sh, manual = self._tree(d)
+            self._mp4(sh / "flow" / "flow.mp4", 500)
+            self._mp4(sh / "flow" / "flow.silent.mp4", 300)
+            self._md(manual, "a.md", ["flow/flow.mp4"])
+            r = run_module("prune-silent-backups", str(sh), "--apply")
+            self.assertEqual(r.returncode, 0, msg=r.stderr)
+            self.assertIn("flow.silent.mp4", r.stdout)
+            self.assertIn("deleted", r.stderr)
+
+    def test_cli_dry_run_default_no_delete(self):
+        with tempfile.TemporaryDirectory() as d:
+            sh, manual = self._tree(d)
+            self._mp4(sh / "flow" / "flow.mp4")
+            self._mp4(sh / "flow" / "flow.silent.mp4")
+            self._md(manual, "a.md", ["flow/flow.mp4"])
+            r = run_module("prune-silent-backups", str(sh))
+            self.assertEqual(r.returncode, 0, msg=r.stderr)
+            self.assertIn("dry-run", r.stderr)
+            self.assertTrue((sh / "flow" / "flow.silent.mp4").exists())

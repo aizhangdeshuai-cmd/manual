@@ -111,6 +111,7 @@ from .recording import (
     _infer_target_url,
     _infer_starting_route,
     _infer_auth_env_name,
+    _infer_viewport,
     _extract_step_captions,
     _step_template_lines,
     _normalize_mapping_value,
@@ -165,6 +166,7 @@ __all__ = [
     "scan_recording_placeholders", "build_recorder_template",
     "_step_template_lines_v2", "_read_manual_config",
     "_infer_target_url", "_infer_starting_route", "_infer_auth_env_name",
+    "_infer_viewport",
     "_extract_step_captions", "_step_template_lines",
     "_normalize_mapping_value", "apply_recording_mapping",
     # db

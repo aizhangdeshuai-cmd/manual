@@ -160,7 +160,7 @@ def build_recorder_template(
         ),
         "name": manual_name,
         "url": inferred_url,
-        "viewport": {"width": 1440, "height": 900},
+        "viewport": _infer_viewport(config),
         "output_dir": f"docs/user-manual/screenshots/{domain}/<TODO: subdir>",
         # C fix (v0.2.4 audit): the recorder's resolve_credential() only
         # expands values that start with "$". Bare names like "AUTH_USER"
@@ -235,6 +235,30 @@ def _read_manual_config(project_root: Path | None) -> dict:
         return json.loads(cfg_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
+
+
+def _infer_viewport(config: dict) -> dict:
+    """v2.1.0: pick the recorder viewport from manual-config.json so projects
+    can record at their real operator screen size (a.k.a. "full screen").
+
+    Reads ``recording.viewport: {width, height}`` (top-level under the
+    config root, not under ``project``). Falls back to 1920x1080 — the
+    common desktop logical resolution — so the default is no longer the
+    old 1440x900 that produced letterboxed, small-ish videos. Width/height
+    must be positive ints; anything else is ignored and the default is used.
+
+    Why a fixed large viewport (not a "maximize real window" mode):
+    headless recording with a deterministic viewport is stable across
+    re-runs and CI; a headed maximized window drifts when the operator
+    switches focus and is implausible in headless jobs. Same approach
+    Playwright itself recommends for reproducible video.
+    """
+    if config:
+        vp = config.get("recording", {}).get("viewport") or {}
+        w, h = vp.get("width"), vp.get("height")
+        if isinstance(w, int) and isinstance(h, int) and w > 0 and h > 0:
+            return {"width": w, "height": h}
+    return {"width": 1920, "height": 1080}
 
 
 def _infer_target_url(config: dict, project_root: Path | None) -> str:
@@ -447,7 +471,7 @@ def apply_recording_mapping(text: str, mapping: dict) -> tuple[str, dict, list, 
       - replaced_instances: total count of placeholder occurrences
         replaced (can exceed len(replaced) if same key appears 2+ times)
     """
-    reemplazado = {}
+    replaced = {}
     missing = []
     replaced_instances = 0
     for key, raw_value in mapping.items():
@@ -479,7 +503,7 @@ def apply_recording_mapping(text: str, mapping: dict) -> tuple[str, dict, list, 
             # v0.2.x behavior so existing mappings don't need migration).
             new_text, n = pattern.subn(f"![{alt_text}]({real_path})", text)  # count=0: replace all
             text = new_text
-            reemplazado[key] = real_path
+            replaced[key] = real_path
             replaced_instances += n
     remaining = scan_recording_placeholders(text)
     for p in remaining:
@@ -517,4 +541,106 @@ def apply_recording_mapping(text: str, mapping: dict) -> tuple[str, dict, list, 
                     "reason": (f"No mapping entry for this "
                                f"{p['kind']} placeholder."),
                 })
-    return text, reemplazado, missing, replaced_instances
+    return text, replaced, missing, replaced_instances
+
+
+# v2.1.0: recorder (recorder/SKILL.md) synthesizes a narrated video and
+# keeps the PRE-narration silent copy as `<name>.silent.mp4` next to it.
+# The silent copy is a backup, never referenced by any manual .md (only
+# the narrated `<name>.mp4` is) — but it's written into screenshots/ and
+# gets committed. The ehr manual shipped 6 silent copies (~2.8MB of pure
+# dead weight in git). This helper prunes orphan .silent.mp4 files whose
+# narrated sibling is NOT referenced by any of the given manual .md files.
+#
+# "Referenced" = ANY manual .md contains the narrated sibling's filename
+# (basename) — we match on basename because manuals reference assets via
+# relative paths like `../screenshots/x/x.mp4` and we only need to know
+# that the narrated copy is in use, which implies its silent backup is
+# the one to prune. If the narrated sibling itself is missing or
+# unreferenced, the silent copy is NOT pruned (it might be all the user
+# has) — we surface it as `keep_orphan`.
+_SILENT_RE = re.compile(r"^(?P<stem>.+)\.silent\.mp4$")
+
+
+def prune_silent_backups(
+    screenshots_dir: Path,
+    manual_paths: list[Path],
+    apply: bool = False,
+) -> dict:
+    """Find and (optionally) delete `.silent.mp4` files under
+    ``screenshots_dir`` whose narrated sibling is referenced by one of
+    ``manual_paths``.
+
+    A silent file ``<stem>.silent.mp4`` is pruned iff:
+      - its narrated sibling ``<stem>.mp4`` EXISTS on disk, AND
+      - some manual .md references that sibling by basename.
+
+    Silent files whose narrated sibling is missing OR unreferenced are
+    reported as ``keep_orphan`` (left on disk) — pruning those could
+    delete the only copy.
+
+    Args:
+        screenshots_dir: directory tree holding the .silent.mp4 files
+            (and their narrated siblings).
+        manual_paths: manual .md files whose references drive the
+            "is the narrated copy in use?" decision.
+        apply: False (default) = dry-run, just report. True = unlink
+            the prunable files.
+
+    Returns a report dict:
+        ``prunable``       — list of .silent.mp4 paths safe to delete
+        ``keep_orphan``    — silent paths kept (no narrated sibling in use)
+        ``deleted``        — actually deleted (only when apply=True)
+        ``bytes_freed``    — bytes unlinked (only when apply=True)
+    """
+    screenshots_dir = Path(screenshots_dir).resolve()
+    if not screenshots_dir.is_dir():
+        raise FileNotFoundError(f"screenshots dir not found: {screenshots_dir}")
+
+    # Collect every manual's text once; reference set = basenames of any
+    # `something.mp4` (silent paths can't be referenced because the
+    # recorder never names an output `.silent.mp4`).
+    referenced: set[str] = set()
+    for mp in manual_paths:
+        mp = Path(mp)
+        if not mp.exists():
+            continue
+        try:
+            txt = mp.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            txt = mp.read_text(encoding="utf-8", errors="replace")
+        for m in re.finditer(r"[\w./-]+\.mp4(?=\s|\)|\]|$)", txt):
+            referenced.add(Path(m.group(0)).name)
+
+    prunable: list[str] = []
+    keep_orphan: list[str] = []
+    deleted: list[str] = []
+    bytes_freed = 0
+
+    for candidate in sorted(screenshots_dir.rglob("*.silent.mp4")):
+        m = _SILENT_RE.match(candidate.name)
+        if not m:
+            continue
+        narrated = candidate.with_name(f"{m.group('stem')}.mp4")
+        narrated_in_use = narrated.exists() and narrated.name in referenced
+        if narrated_in_use:
+            prunable.append(str(candidate))
+        else:
+            keep_orphan.append(str(candidate))
+
+    if apply:
+        for p in prunable:
+            try:
+                sz = Path(p).stat().st_size
+                Path(p).unlink()
+                deleted.append(p)
+                bytes_freed += sz
+            except OSError as e:
+                print(f"warn: could not delete {p}: {e}", file=sys.stderr)
+
+    return {
+        "prunable": prunable,
+        "keep_orphan": keep_orphan,
+        "deleted": deleted,
+        "bytes_freed": bytes_freed,
+    }

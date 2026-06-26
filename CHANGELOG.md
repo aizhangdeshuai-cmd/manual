@@ -1,4 +1,123 @@
-## 2.0.0 (2026-06-25) — BREAKING: split recorder out of user-manual
+## 2.2.0 (2026-06-26) — task-card video must live in `#### 演示视频`, never inside `#### 步骤`
+
+Auditing the ehr manual alongside the recorder changes surfaced one more
+structural issue: the LLM placed `[VIDEO: x](path.mp4)` *inline on a
+step line* (e.g. `2. 点按钮 [VIDEO: 演示](flow.mp4)`), so the viewer
+rendered a `<video>` card mid-paragraph, breaking the "watch the demo,
+then follow the steps" reading order. v2.2.0 hardens the contract.
+
+### What changed
+
+- `validate-output.py`:
+  - New check `video_outside_steps` (14th): scans every `###/#### 步骤`
+    block delimited by the next heading and FAILs if any `](.mp4)`
+    reference is found within.
+  - Check count is now 14.
+- `SKILL.md`:
+  - §2.6 rewrote "任务卡中关键步骤配视频" to: each task card's video
+    lives in a dedicated `#### 演示视频` section placed **before**
+    `#### 步骤`; the steps block itself contains step prose + `![alt](png)`
+    screenshots only.
+  - §4 task-card template now shows the new `#### 演示视频` block.
+  - §5.4 self-check table: row 14 added.
+
+### Tests
+
+- `test_validate_output.py`: +4 tests (`VideoOutsideStepsTests`),
+  `test_json_mode` count 13 → 14. Suite: 125 → 129, all green.
+
+### Proof on the ehr manual
+
+The check was authored against the ehr manual as the failing case: 3
+step-line videos in `report-config`, 3 in `report-viewer` (6 offenders
+total). After moving each into its task's `#### 演示视频` section (and
+fixing a `[ ideo:` typo in the process), all three manuals pass 14/14.
+
+Audited the ehr-generated manual against the skill's own toolchain and
+found three defects that `validate-output.py` was not catching — the
+manual shipped fine under the old 11 checks but the deliverable was
+wrong. v1.2.0 hardens the contract so the same degeneration cannot ship
+again.
+
+### Why
+
+- **Empty `description` × 3 manuals**: INTEGRATION §3.5 says viewer v2
+  parses frontmatter `description` into the search-result excerpt.
+  SKILL §3 row 1 and the §5 output-format line never listed it, so the
+  LLM omitted it on every manual — viewer search was silently dead.
+- **15 unfilled template terms in the overview**: `对应地址/`,
+  `手册所在目录`, `起静态站服务` (a subcommand display-name used as a
+  real command) survived into the deliverable. They were all
+  backtick-wrapped, so they looked "codey" — exactly the disguise
+  §2.2 bans for alt text.
+- **6 `.silent.mp4` backups (~2.9MB) committed**: recorder keeps a
+  pre-narration silent copy next to the narrated video (recorder/SKILL.md
+  §narration). Only the narrated `.mp4` is ever referenced; the silent
+  copy stayed in `screenshots/` and got committed.
+
+### What changed
+
+- `validate-output.py`:
+  - New check `frontmatter_description` (12th, FAIL when `description`
+    is missing / empty / `<TODO:>` / `占位` / `<your-...>`). Sourced from
+    a tolerant frontmatter parser shared in shape with `html._parse`.
+  - New check `unfilled_template_terms` (13th, FAIL when raw text
+    contains `对应地址` / `手册所在目录` / `起静态站服务` /
+    `<your-...>`). Scanned on RAW text incl. inside backticks — the
+    three stub tokens are never valid literals, so backticks cannot
+    mask them (the failure mode that hid the ehr defects).
+  - Check count is now 13 (was 11). `--json` consumers that pinned the
+    count must update.
+- `manual_helper/recording.py`:
+  - New `prune_silent_backups(screenshots_dir, manual_paths, apply=)`
+    deletes `.silent.mp4` files whose narrated sibling is referenced by
+    a manual. Default is dry-run; `--apply` writes to disk. Orphan
+    silent files (no in-use narrated sibling) are kept, never auto-deleted.
+  - New CLI subcommand `prune-silent-backups <screenshots-dir>
+    [--manual <md>...] [--apply]`. Without `--manual`, auto-discovers
+    `<screenshots-dir>/../manual/*.md`.
+- `SKILL.md`:
+  - §3 row 1 and §5 output-format line: `description` listed as required.
+  - §5.4 self-check table: rows 9-13 added (directory_anchors,
+    task_card_headings, audience_leak, frontmatter_description,
+    unfilled_template_terms).
+  - §7 subcommand table: `prune-silent-backups` added.
+
+### Tests
+
+- `test_validate_output.py`: +12 tests (`FrontmatterDescriptionTests`,
+  `UnfilledTemplateTermsTests`), GOOD fixture frontmatter + description,
+  `test_json_mode` count bumped 11 → 13.
+- `test_manual_helper.py`: +6 tests (`PruneSilentBackupsTests`) covering
+  dry-run vs apply, orphan keeping, unreferenced-narrated keeping, CLI
+  dry-run default, CLI auto-discovery.
+- Suite: 104 → 122 tests, all green.
+
+### Proof on the ehr manual
+
+The three ehr manuals (`customer/docs/user-manual/manual/*.md`) were the
+audit input. Before the fix they passed the 11-check suite; with v1.2.0
+they surfaced 3× empty-description + 15 unfilled-template-term defects.
+After re-editing the overview and adding `description` to all three,
+they pass all 13 checks. `prune-silent-backups --apply` then freed
+2,916,508 bytes by deleting the 6 silent backups (0 kept).
+
+### Recorder viewport now configurable + full-screen by default
+
+The auditor also flagged that recorded videos were 1440×900 (a hard-coded
+viewport in `build_recorder_template`), which recorded fine but showed
+letterboxed against a real operator screen. v2.1.0:
+
+- `build_recorder_template` reads `manual-config.json` `recording.viewport:
+  {width, height}` (new top-level config field, not under `project`).
+  Default raised 1440×900 → **1920×1080** so videos match a common desktop
+  logical resolution out of the box ("full screen" recording without a
+  headed/maximize mode, which Playwright headless cannot reproduce
+  deterministically).
+- New `_infer_viewport(config)` with non-positive / non-int guard.
+- +3 tests (`test_viewport_default_is_full_screen`,
+  `test_viewport_read_from_config`, `test_viewport_ignores_garbage`).
+- SKILL §13 recorder section documents the new config field.
 
 The recording phase has been a single-package subsystem of user-manual
 since v0.2.3. Over time it grew to ~3700 lines (≈56KB) inside
