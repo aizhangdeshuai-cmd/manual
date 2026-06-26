@@ -11,7 +11,7 @@ SKILL.md            # full spec (orchestrator)
 INTEGRATION.md      # 30-min setup guide for first-time users
 scripts/
   extract-*.py      # 5 deterministic extractors (one per artifact type)
-  manual_helper.py  # orchestrator, 15 subcommands (see SKILL.md §7)
+  manual_helper/   # orchestrator package (v2.0.0 split from manual_helper.py), run via `cd scripts && python3 -m manual_helper <cmd>`
   validate-output.py# 6 must-pass checks before commit
   tests/            # 27 stdlib unittest tests, no external deps
 templates/
@@ -69,7 +69,7 @@ When you change anything inside `templates/user-manual.html`:
 
 Do not bundle the HTML into a self-contained file unless you also know how
 to rebuild the standalone version (see `build_standalone()` in
-`manual_helper.py`).
+`manual_helper/` package — run via `cd scripts && python3 -m manual_helper <subcommand>`).
 
 ## Code style
 

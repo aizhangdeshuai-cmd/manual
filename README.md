@@ -35,9 +35,9 @@ user-manual/
 │   ├── extract-openapi.py      # OpenAPI 3.x 元数据(fallback)
 │   ├── manual_helper/         # orchestrator package (v2.0.0 split), 15 个子命令(SKILL.md §7)
 │   ├── validate-output.py      # 6 项必跑校验,失败阻断 commit
-│   ├── tests/                  # 33 个 stdlib unittest,无外部依赖
+│   ├── tests/                  # 100 个 stdlib unittest,无外部依赖
 ├── templates/
-│   └── user-manual.html  # 自包含 dashboard(版本号:24)
+│   └── user-manual.html  # 自包含 dashboard(版本号:25)
 ├── examples/
 │   ├── db-backend/       # 完整 FastAPI + Postgres + S3 例子
 │   ├── custom-helper/    # Tier 2 适配指南 + drop-in 代码片段
