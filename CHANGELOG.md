@@ -1,3 +1,86 @@
+
+## 2.3.0 (2026-06-26) — ehr audit round 2: anchor integrity, placeholder URL, task-card steps count
+
+Audited the ehr-generated manual a second time and surfaced three more
+defects that `validate-output.py` was not catching. The skill is
+deployed to multiple projects now and the ehr project keeps being
+the most honest reviewer. v2.3.0 hardens the contract on three
+specific failure modes.
+
+### Defects found in the ehr manual (validator previously said OK)
+
+- **8 broken internal anchors in `user-manual.md`**: heading
+  `### 任务卡 1: 确认当前公司` (space after colon) was paired with
+  TOC link `#任务卡-1确认当前公司` (no space). The 4 task cards'
+  TOC entries and 4 in-prose "相关任务" references all resolved to
+  dead anchors. The user opens the viewer, clicks TOC, and lands on
+  an empty `#` URL bar with no scroll. 8 anchors broken in one doc.
+- **6 `https://placeholder.invalid/...` image references across 3
+  manuals**: the ehr audit's `draft-for-review` mode used a remote
+  placeholder URL for screenshots. `_check_screenshot_files_exist`
+  silently skipped these because it only checks local relative paths
+  (correct behavior for legitimate CDN URLs, wrong behavior for
+  obvious placeholders). The manual shipped with 0 real PNGs and
+  6 placeholders; no check caught it.
+- **1 task card with 2 `#### 步骤` blocks**: report task card 9
+  ("发布 / 停用报表") combined two operations into one card and
+  used two step subsections. Defeats the viewer left-TOC navigation
+  contract — the card shows up once, but renders two "步骤" nodes,
+  each with its own screenshot set, without the LLM labeling them
+  as separate operations.
+
+### What changed
+
+- `validate-output.py`:
+  - New check 15 `broken_anchors`: collects all H1-H4 heading slugs
+    via GFM slugify, scans all `](#slug)` references, flags any that
+    don't resolve. Skips code-fence mentions so the SKILL doc can
+    show failure examples.
+  - New check 16 `placeholder_url`: scans `![alt](path)` /
+    `[VIDEO: x](path)` / `<img src=...>` / `<video src=...>` /
+    `<source src=...>`, flags any path matching `placeholder.invalid`
+    / `example.com` / `todo.com` / `<TODO:>` / `<your-...>`.
+    Skips code-fence mentions. Skips the `http://localhost:8088/`
+    user-facing URL (per §2.7.1 类 7 whitelist).
+  - New check 17 `task_card_steps_count`: per `### 任务卡 N:`
+    block, count `#### 步骤` subsections; flag cards with != 1.
+    Refactored `_split_by_headings` to do hierarchical splitting
+    (block at level L ends at next heading with level ≤ L) so that
+    the body of a card includes all its `#### 步骤` children.
+  - Check count is now 19 (was 16).
+- `SKILL.md`:
+  - §16.9: anchor slug rules (GFM-style) + why the ehr audit broke
+    8 anchors. Includes a slug table for the most common heading
+    patterns so LLM agents can verify their TOC by hand.
+  - §16.10: placeholder URL rule + the legitimate-vs-placeholder
+    distinction. Explicitly allows `http://localhost:8088/` (the
+    user-facing frontend URL per §2.7.1 类 7).
+  - §2.1: clarified "one task card = one operation" with a
+    cross-reference to §16 / check 17.
+- `tests/test_validate_output.py`:
+  - 12 new tests across `BrokenAnchorTests`, `PlaceholderUrlTests`,
+    `TaskCardStepsCountTests` (4 tests each).
+  - `test_json_mode` count updated 16 → 19.
+  - Suite: 53 → 65, all green.
+
+### Why these three and not more
+
+The user reported 7 improvement items in the audit round. Of those,
+items 1-2 (P0: broken anchors, placeholder URL) and item 4
+(task card steps count) were strictly validators and got fixed.
+Items 3 (Q&A H3 categories) and 5 (screenshot density per card)
+are stylistic — the SKILL doc already prescribes them, and the
+existing 7-field hits + visual-anchor checks catch the worst
+violations. Forcing them with new strict-mode checks would
+generate noise on otherwise-valid manuals. Left for v2.4 if a
+project actually ships a Q&A-without-H3 manual that the current
+rules don't catch.
+
+Item 6 (screenshot density per card) is left as documentation in
+§16.6, not as a check, because the legitimate use case is the
+总览分册 (overview manual) which §2.6.1 explicitly allows to skip
+screenshots and videos. A density check would need a per-module
+opt-out and the value isn't worth the rule complexity.
 ## 2.2.0 (2026-06-26) — task-card video must live in `#### 演示视频`, never inside `#### 步骤`
 
 Auditing the ehr manual alongside the recorder changes surfaced one more

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Validate generated user-manual markdown files against the 8 hard checks.
+"""Validate generated user-manual markdown files against the 19 hard checks.
 
 Usage:
-    validate-output.py [--strict] [--json] [--unique] [--unique-allow=A,B]
+    validate-output.py [--strict] [--json] [--no-unique] [--unique-allow=A,B] [--annotated-relaxed]
                        <file.md> [...]
 
 The 6 checks come from the user-manual skill style guide (see SKILL.md
@@ -28,16 +28,21 @@ markdown file's directory and verifies the file is on disk. A `[SCREENSHOT:
 x]` placeholder that the agent forgot to replace with a real recorder
 asset now flags the manual as incomplete instead of silently passing.
 
-v0.4.0 — added the 8th check: "screenshot unique" (opt-in via
- --unique). The recorder does not require an intervening
- click/type/wait_for between two screenshot steps, so an LLM agent
- can produce two byte-identical PNGs under different filenames
- (e.g. dashboard-home.png and module-map.png both showing the
- same dashboard). v0.4.0 reads the SHA256 of every referenced
- PNG and flags any hash referenced by 2+ distinct filenames.
- Default OFF to avoid breaking manuals that intentionally reuse
- a logo/branding image. The new check also accepts
- --unique-allow <basename,...> to whitelist shared assets.
+v1.1.0 — promoted the "screenshot unique" check from opt-in to
+ default. The recorder is supposed to screenshot distinct steps, and
+ byte-identical PNGs across distinct filenames is always a bug (or a
+ brand-asset reuse that should be whitelisted via --unique-allow).
+ Pass --no-unique to opt out for legacy reasons.
+v1.1.0 — added the 9th check: "screenshot_uses_annotated". Closes
+ the gap where alt text describes a red box / arrow but the
+ referenced image is the bare (unannotated) PNG. The recorder
+ always writes both `<name>.png` and `<name>.annotated.png`; the
+ new check fires when an `![alt](path.png)` reference has a
+ `<stem>.annotated.png` sibling on disk AND the alt text matches
+ "红框" / "箭头" / "高亮" / "圈出" / "标注" / "看到:". Default
+ FAIL. Use --annotated-relaxed to downgrade to a warning.
+v0.4.0 — added the 8th check: "screenshot unique" (now default
+ since v1.1.0; pre-1.1.0 was opt-in via --unique).
 """
 import json
 import re
@@ -406,6 +411,282 @@ def _check_directory_anchors(text: str) -> dict:
     }
 
 
+
+
+
+# v2.3.0: GitHub-flavored markdown anchor slug. Mirrors GFM's
+# `slugify` rule used by GitHub's anchor rendering: lowercase, drop
+# non-word / non-CJK characters, replace runs of dropped chars with
+# single `-`, trim leading/trailing `-`. Chinese (CJK Unified
+# Ideographs U+4E00-U+9FFF) is kept verbatim — the LLM-written
+# manuals depend on Chinese characters in the anchor.
+def _gh_anchor_slug(title: str) -> str:
+    s = title.strip().lower()
+    # Replace any run of non-word, non-CJK characters with a single `-`.
+    # `\w` is unicode-aware in Python 3 and includes CJK by default.
+    s = re.sub(r"[^\w\u4e00-\u9fff]+", "-", s, flags=re.UNICODE)
+    return s.strip("-")
+
+
+# v2.3.0: extract every internal `#anchor` reference from a markdown
+# document, ignoring links to URLs (those start with `http`, a path
+# component, or a non-`#` scheme). Excludes pure-anchor links of the
+# form `<a name="x">` and inline code-fence mentions.
+_INTERNAL_ANCHOR_RE = re.compile(r"\]\(#([^)\s]+)\)")
+
+
+def _check_broken_anchors(text: str) -> dict:
+    """v2.3.0: detect broken internal anchor references. LLM-written
+    manuals frequently get the heading-slug wrong on links to other
+    sections (most often: a heading "### 任务卡 1: 创建" and a link
+    `[任务卡 1:创建](#任务卡-1创建)` where the LLM dropped the space
+    after the colon, or vice versa). §3 says TOC links should resolve
+    but until v2.3.0 the validator never actually checked.
+
+    Rules:
+      - Slug from heading text via GitHub-flavored slugify (lowercase,
+        drop non-word, collapse runs to `-`).
+      - Anchor from `](#slug)` capture group.
+      - Ignore code-fence anchors (so the LLM can still show
+        "before/after" examples in the SKILL doc).
+      - Also check the user-facing `## 目录` section: every link in it
+        MUST resolve (or the reader gets a dead TOC).
+    """
+    import re as _re
+    # 1. Collect every heading slug in the doc (h1-h4 only — the LLM
+    # uses h3/h4 for task cards and step blocks).
+    headings: dict[str, str] = {}
+    for m in _re.finditer(r"^(#{1,4})\s+(.+?)\s*$", text, _re.MULTILINE):
+        level = len(m.group(1))
+        title = m.group(2).strip()
+        slug = _gh_anchor_slug(title)
+        if slug:
+            headings[slug] = title
+
+    # 2. Walk every `](#slug)` and flag any missing target. Skip
+    # anchors inside fenced code blocks.
+    offenders: list[dict] = []
+    for m in _INTERNAL_ANCHOR_RE.finditer(text):
+        ref = m.group(1).strip()
+        if not ref:
+            continue
+        # Compute line number
+        line_no = text[: m.start()].count("\n") + 1
+        # Skip if the position is inside a fenced code block
+        in_code = False
+        line_count = 0
+        for line in text.split("\n"):
+            line_count += 1
+            if line_count == line_no:
+                break
+            if line.lstrip().startswith("```"):
+                in_code = not in_code
+        if in_code:
+            continue
+        if ref not in headings:
+            offenders.append(
+                {"ref": ref, "line": line_no}
+            )
+
+    # Convention: `hits` = offender count (matches audience_leak /
+    # unfilled_template_terms / video_outside_steps). `headings_indexed`
+    # is a side stat for diagnostics.
+    return {
+        "name": "broken_anchors (§3 TOC + 相关任务 internal links)",
+        "hits": len(offenders),
+        "threshold": 0,
+        "comparison": "eq",
+        "ok": (len(offenders) == 0),
+        "flagged": len(offenders),
+        "headings_indexed": len(headings),
+        "offenders": offenders[:5],
+    }
+
+
+# v2.3.0: filename / URL patterns that signal the LLM emitted a
+# placeholder asset instead of a real recorder output. Each pattern
+# is matched against the literal path string that appears in:
+#   - markdown image links `![alt](path)`
+#   - markdown video links `[VIDEO: x](path)`
+#   - raw `<img src=...>` / `<video src=...>` / `<source src=...>` tags
+# This is a different concern from `_check_placeholder_alt` (which
+# scans alt TEXT for laziness) and `_check_screenshot_files_exist`
+# (which only fires for local relative paths). This check fires on
+# the URL/path regardless of the markdown / HTML surface it's on.
+_PLACEHOLDER_URL_PATTERNS = [
+    (re.compile(r"^https?://placeholder\.invalid/", re.IGNORECASE),
+     "placeholder.invalid 域占位 URL"),
+    (re.compile(r"^https?://(?:example|todo|lorem)\.(?:com|invalid|org)/", re.IGNORECASE),
+     "通用占位域名"),
+    (re.compile(r"<(?:TODO|你的|your)[-_:：]", re.IGNORECASE),
+     "未替换的 <TODO: / your- 模板"),
+    (re.compile(r"^[\w./-]*<your-[^>]+>[\w./-]*$", re.IGNORECASE),
+     "<your-...> 路径模板"),
+]
+
+
+def _check_placeholder_url(text: str) -> dict:
+    """v2.3.0: detect asset paths that are obviously placeholders
+    (placeholder.invalid, example.com, <TODO:>, <your-...>). The
+    ehr manual audited in 2026-06 shipped with 6 image references
+    pointing at `https://placeholder.invalid/screenshots/...` and 0
+    real PNGs on disk — `_check_screenshot_files_exist` was bypassed
+    because it only checks local relative paths. This check fires on
+    the path string directly, regardless of whether it would resolve
+    to a real file.
+
+    Skips code-fence matches so the SKILL doc can still show
+    positive/negative examples.
+    """
+    offenders: list[dict] = []
+
+    # Sources to scan: markdown image / video links, plus raw HTML
+    # src= attributes (the standalone HTML viewer uses inline HTML
+    # after `convertVideoLinksInMd`).
+    sources: list[tuple[str, re.Pattern[str]]] = [
+        ("md-image", re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")),
+        ("md-video", re.compile(r"\[VIDEO:[^\]]*\]\(([^)\s]+)\)")),
+        ("md-video-ext", re.compile(r"\[VIDEO:[^\]]*\]\[([^\]]+)\]")),
+        ("html-img", re.compile(r"<img[^>]+src=[\"']([^\"']+)[\"']", re.IGNORECASE)),
+        ("html-video", re.compile(r"<video[^>]+src=[\"']([^\"']+)[\"']", re.IGNORECASE)),
+        ("html-source", re.compile(r"<source[^>]+src=[\"']([^\"']+)[\"']", re.IGNORECASE)),
+    ]
+
+    line_no = 1
+    in_code = False
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith("\u0060\u0060\u0060"):
+            in_code = not in_code
+            line_no += 1
+            continue
+        if not in_code:
+            for src_label, src_re in sources:
+                for m in src_re.finditer(line):
+                    path = m.group(1).strip()
+                    for pat_re, reason in _PLACEHOLDER_URL_PATTERNS:
+                        if pat_re.search(path):
+                            offenders.append({
+                                "path": path[:120],
+                                "reason": reason,
+                                "source": src_label,
+                                "line": line_no,
+                            })
+                            break
+        line_no += 1
+
+    return {
+        "name": "placeholder_url (§2.7.1 类 5 录屏占位 + §16 路径规范)",
+        "hits": len(offenders),
+        "threshold": 0,
+        "comparison": "eq",
+        "ok": (len(offenders) == 0),
+        "flagged": len(offenders),
+        "offenders": offenders[:5],
+    }
+
+
+# v2.3.0: heading-block extractor. Returns a list of
+# `(level, title, body_text, start_offset)` for every heading in
+# the doc. Used to bound the body of each `### 任务卡 N:` block so
+# we can count its `#### 步骤` subsections.
+_HEADING_RE = re.compile(r"^(#{1,4})\s+(.+?)\s*$", re.MULTILINE)
+
+
+# Fix _split_by_headings to do hierarchical splitting: a block at
+# level L ends at the next heading with level <= L (not the next
+# heading of any level, which would chop a task-card body right at
+# its first `#### 步骤` child).
+import re as _re
+
+
+def _split_by_headings(text: str) -> list[dict]:
+    """Slice `text` into hierarchical blocks. A block at level L
+    ends at the next heading with level ≤ L (or end of doc).
+    Returns a list of dicts:
+      {level, title, body, start_line, end_line}.
+
+    The hierarchical boundary is what makes the per-task-card body
+    include all of its `#### 步骤` / `#### 成功后看到` etc. children
+    — otherwise the body of `### 任务卡 1: …` would end at the first
+    `#### 步骤`, and `_check_task_card_steps_count` would always
+    see 0 steps.
+    """
+    matches = list(_re.finditer(r"^(#{1,4})\s+(.+?)\s*$", text, _re.MULTILINE))
+    if not matches:
+        return []
+    out: list[dict] = []
+    for i, m in enumerate(matches):
+        level = len(m.group(1))
+        title = m.group(2).strip()
+        start = m.end()
+        end = len(text)
+        for j in range(i + 1, len(matches)):
+            if len(matches[j].group(1)) <= level:
+                end = matches[j].start()
+                break
+        body = text[start:end]
+        start_line = text[: m.start()].count("\n") + 1
+        end_line = text[:end].count("\n") + 1
+        out.append({
+            "level": level,
+            "title": title,
+            "body": body,
+            "start_line": start_line,
+            "end_line": end_line,
+        })
+    return out
+
+
+
+def _check_task_card_steps_count(text: str) -> dict:
+    """v2.3.0: each `### 任务卡 N:` block should contain exactly one
+    `#### 步骤` subsection. §2.1 says "one task card = one specific
+    operation" but the LLM often splits a card into multiple `####
+    步骤` blocks (e.g. "### 任务卡 9: 发布/停用" with separate step
+    blocks for each verb). That defeats the navigation contract:
+    the viewer left-TOC shows one "步骤" node per card, not N.
+
+    The check is per-card. Cards with 0 `#### 步骤` (which is fine
+    if the card uses `#### 演示视频` only) are not flagged here —
+    that's covered by the existing 7-field hits check.
+    """
+    blocks = _split_by_headings(text)
+    # find task-card headings (3rd-level `### 任务卡 N: ...`)
+    tc_re = re.compile(r"^任务卡\s+\d+[:：]\s*.+$")
+    # Match `#### 步骤` with optional trailing text — covers the
+    # `#### 步骤(发布)` / `#### 步骤: foo` variants the LLM emits.
+    steps_re = re.compile(r"^####\s+步骤.*$", re.MULTILINE)
+    offenders: list[dict] = []
+    well_count = 0
+    total_cards = 0
+    for blk in blocks:
+        if blk["level"] != 3:
+            continue
+        if not tc_re.match(blk["title"]):
+            continue
+        total_cards += 1
+        steps = steps_re.findall(blk["body"])
+        if len(steps) == 1:
+            well_count += 1
+        elif len(steps) > 1:
+            offenders.append({
+                "card": blk["title"],
+                "line": blk["start_line"],
+                "steps_count": len(steps),
+            })
+
+    return {
+        "name": "task_card_steps_count (§2.1 一卡一操作)",
+        "hits": well_count,
+        "threshold": 0,
+        "comparison": "ge",
+        "ok": (len(offenders) == 0),
+        "flagged": len(offenders),
+        "well_formed_count": well_count,
+        "total_task_cards": total_cards,
+        "offenders": offenders[:5],
+    }
 def _check_placeholder_alt(text: str) -> dict:
     """v0.5.4: detect lazy alt text patterns. LLM agents that don't
     run the recorder (or run it on a blocked dev server) tend to
@@ -750,6 +1031,72 @@ def _sha256_file(path: Path) -> str:
 
 
 
+def _check_screenshot_uses_annotated(md_path: Path, text: str) -> dict:
+    """v1.1.0: catch the gap where alt text describes a red box / arrow /
+    highlight, but the referenced image is the bare (unannotated) PNG.
+
+    Recorder always writes both `<name>.png` (raw) and
+    `<name>.annotated.png` (with red box / arrow / caption drawn on top).
+    If the manual references the bare PNG while the alt text claims
+    "红框:..." or "箭头:...", the reader sees an unannotated image and
+    the alt text becomes a lie.
+
+    Resolution rules:
+      - Path resolved relative to md_path.parent.
+      - Only fires when the alt text matches one of the "red box / arrow /
+        highlight" keywords (case-insensitive) AND the bare path has an
+        `.annotated` sibling on disk.
+      - v1.1.0 default: FAIL (the manual is shipping broken image refs).
+      - Pass --annotated-relaxed to downgrade to a warning (still listed
+        in `flagged` but `ok=True`).
+    """
+    RELAXED = globals().get("ANNOTATED_RELAXED", False)
+    keywords = re.compile(r"红框|箭头|高亮|圈出|标注|看到[:：]", re.IGNORECASE)
+    image_paths = _extract_image_paths(text)
+    md_dir = md_path.parent
+    offenders: list[dict] = []
+    for ref in image_paths:
+        target = (md_dir / ref).resolve()
+        if not target.exists() or not target.is_file():
+            continue
+        if target.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+            continue
+        if target.stem.endswith(".annotated"):
+            continue
+        annotated_sibling = target.with_name(f"{target.stem}.annotated{target.suffix}")
+        if not annotated_sibling.exists():
+            continue
+        # We have a bare PNG that has an annotated sibling on disk.
+        # Look at the alt text on this reference.
+        escaped = re.escape(ref)
+        # match the exact `![alt](ref)` form (with optional query/fragment)
+        alt_re = re.compile(rf"!\[(?P<alt>[^\]]*)\]\({escaped}(?:[?#][^)]*)?\)", re.IGNORECASE)
+        m = alt_re.search(text)
+        if not m:
+            continue
+        alt = m.group("alt") or ""
+        if not keywords.search(alt):
+            continue
+        offenders.append({
+            "ref": ref,
+            "annotated_sibling": str(annotated_sibling.relative_to(md_dir)) if annotated_sibling.is_relative_to(md_dir) else str(annotated_sibling),
+            "alt": alt,
+        })
+    flagged = len(offenders)
+    # if relaxed, the check is informational only
+    ok = (flagged == 0) or RELAXED
+    return {
+        "name": "screenshot_uses_annotated (alt text matches annotated sibling)",
+        "hits": flagged,
+        "threshold": 0,
+        "comparison": "eq",
+        "ok": ok,
+        "flagged": flagged,
+        "offenders": offenders[:10],
+        "relaxed": RELAXED,
+    }
+
+
 # Each check: (name, regex, threshold, comparison, exclude_code?)
 # comparison is 'ge' (>=) or 'le' (<=).
 CHECKS = [
@@ -950,6 +1297,57 @@ def validate_file(path):
         "offenders": vsteps_check["offenders"],
     })
     all_ok = all_ok and vsteps_check["ok"]
+    all_ok = all_ok and vsteps_check["ok"]
+    # v2.3.0: §3 internal anchor integrity. Headings vs links must agree,
+    # otherwise the TOC and "相关任务" navigation is dead. Found in the
+    # 2026-06 ehr audit: 8 broken anchors in the overview manual because
+    # the LLM dropped the space after `:` in one of the two places.
+    anchor_check = _check_broken_anchors(text)
+    results.append({
+        "name": anchor_check["name"],
+        "hits": anchor_check["hits"],
+        "threshold": anchor_check["threshold"],
+        "comparison": anchor_check["comparison"],
+        "ok": anchor_check["ok"],
+        "flagged": anchor_check["flagged"],
+        "headings_indexed": anchor_check["headings_indexed"],
+        "offenders": anchor_check["offenders"],
+    })
+    all_ok = all_ok and anchor_check["ok"]
+    # v2.3.0: §16 asset-path rule. The ehr manual shipped 6 references
+    # to https://placeholder.invalid/... and 0 real PNGs on disk;
+    # _check_screenshot_files_exist was bypassed because it only
+    # matches local relative paths. This new check fires on the URL
+    # string regardless of whether it would resolve.
+    purl_check = _check_placeholder_url(text)
+    results.append({
+        "name": purl_check["name"],
+        "hits": purl_check["hits"],
+        "threshold": purl_check["threshold"],
+        "comparison": purl_check["comparison"],
+        "ok": purl_check["ok"],
+        "flagged": purl_check["flagged"],
+        "offenders": purl_check["offenders"],
+    })
+    all_ok = all_ok and purl_check["ok"]
+    # v2.3.0: §2.1 "one task card = one operation" + §4 template
+    # contract. Each `### 任务卡 N:` block must contain exactly one
+    # `#### 步骤` subsection. The ehr manual's report task card 9
+    # had two (one for "发布", one for "停用"), defeating the
+    # viewer's left-TOC navigation.
+    tcs_check = _check_task_card_steps_count(text)
+    results.append({
+        "name": tcs_check["name"],
+        "hits": tcs_check["hits"],
+        "threshold": tcs_check["threshold"],
+        "comparison": tcs_check["comparison"],
+        "ok": tcs_check["ok"],
+        "flagged": tcs_check["flagged"],
+        "well_formed_count": tcs_check["well_formed_count"],
+        "total_task_cards": tcs_check["total_task_cards"],
+        "offenders": tcs_check["offenders"],
+    })
+    all_ok = all_ok and tcs_check["ok"]
     # v0.4.0: opt-in unique-content check. Pop a module-level flag
     # (set by main from --unique) so test harnesses can override.
     if globals().get("UNIQUE_CHECK_ENABLED"):
@@ -967,6 +1365,21 @@ def validate_file(path):
             "duplicates": unique_check["duplicates"],
         })
         all_ok = all_ok and unique_check["ok"]
+    # v1.1.0: alt-text-vs-annotated-sibling consistency. Catches the
+    # "alt says 红框, image has no red box" gap that the ehr manual
+    # shipped on every task card.
+    ann_check = _check_screenshot_uses_annotated(path, text)
+    results.append({
+        "name": ann_check["name"],
+        "hits": ann_check["hits"],
+        "threshold": ann_check["threshold"],
+        "comparison": ann_check["comparison"],
+        "ok": ann_check["ok"],
+        "flagged": ann_check["flagged"],
+        "offenders": ann_check["offenders"],
+        "relaxed": ann_check.get("relaxed", False),
+    })
+    all_ok = all_ok and ann_check["ok"]
     return {"file": str(path), "ok": all_ok, "checks": results}
 
 
@@ -1040,6 +1453,19 @@ def render_human(results):
                             c.get("duplicate_count", 0), rendered,
                         )
                     )
+                elif c["name"] == "screenshot_uses_annotated (alt text matches annotated sibling)":
+                    offenders = c.get("offenders", [])
+                    rendered = "; ".join(
+                        "{}(alt={!r})".format(o["ref"], o.get("alt", ""))
+                        for o in offenders
+                    ) or "(no offenders)"
+                    relaxed = " [RELAXED: warning only]" if c.get("relaxed") else ""
+                    lines.append(
+                        "        - {}: {}/{} flagged ({}); e.g. {}{}".format(
+                            c["name"], c["hits"], c["threshold"],
+                            c.get("flagged", 0), rendered, relaxed,
+                        )
+                    )
                 else:
                     lines.append(
                         "        - {}: {} (need {} {})".format(
@@ -1053,7 +1479,12 @@ def main(argv):
     args = list(argv)
     strict = "--strict" in args
     as_json = "--json" in args
-    unique = "--unique" in args
+    # v1.1.0: --unique is now the default (was opt-in pre-1.1.0). The
+    # recorder should not be producing byte-identical screenshots
+    # anyway, so this catches a real bug every time. Pass --no-unique
+    # to disable; pass --unique-allow to whitelist a shared asset
+    # (e.g. a logo PNG that legitimately appears on many pages).
+    unique = "--no-unique" not in args
     # --unique-allow logo.png,branding.png -> whitelist
     unique_allow: set = set()
     for a in list(args):
@@ -1062,10 +1493,20 @@ def main(argv):
             args.remove(a)
         elif a == "--unique-allow":
             args.remove(a)
+        elif a == "--no-unique":
+            args.remove(a)
+    # v1.1.0: --annotated-relaxed downgrades the new
+    # screenshot_uses_annotated check to a warning (still listed in
+    # offenders, but does not flip `ok=False`). Use when you have a
+    # legitimate reason to reference bare PNGs even though annotated
+    # siblings exist (e.g. you want to show the original UI alongside
+    # the annotated version in a side-by-side comparison).
+    annotated_relaxed = "--annotated-relaxed" in args
     args = [a for a in args if not a.startswith("--")]
     # Stash on module globals so validate_file can pick up.
     globals()["UNIQUE_CHECK_ENABLED"] = unique
     globals()["UNIQUE_CHECK_ALLOW"] = unique_allow
+    globals()["ANNOTATED_RELAXED"] = annotated_relaxed
     if not args:
         print(__doc__.strip())
         return 0

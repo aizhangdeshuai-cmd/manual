@@ -1263,3 +1263,41 @@ v1.0.2 起的 inliner 三层:
 ### 16.8 validator 算 screenshot / video 文件存在时只用 path,不查 candidate
 
 `validate-output.py` 第 7 项严格按 `(md_dir / ref).resolve()` 检查,不会去 `_candidate_paths_for_placeholder` 那一堆 fallback。LLM 写 manual 时**必须**严格按 16.6 的 path 规则,不要写"凭直觉能用就行"的相对 path。
+
+### 16.9 内部 anchor 必须与 heading slug 一致 (v2.3.0)
+
+`validate-output.py` 第 15 项 `broken_anchors` 会扫所有 `](#slug)` 内部链接并与 H1-H4 heading 的真实 slug 比对,任何不匹配的链接直接 FAIL。
+
+**为什么加**:2026-06 audit 同一项目总览分册的 4 个任务卡 anchor **全部 broken** — 标题是 `### 任务卡 1: 确认当前公司`(冒号后有空格),目录里写的是 `[任务卡 1:确认当前公司](#任务卡-1确认当前公司)`(无空格),slug 失配 → TOC 完全死链,4 张卡"相关任务"互相跳转也死。
+
+**slug 规则**(GitHub-flavored,validator 内置):
+
+1. `text.strip().lower()`
+2. 把所有"非 word + 非 CJK 字符"压成单 `-`(中文 U+4E00-U+9FFF 保留)
+3. 去掉首尾 `-`
+
+实测示例:
+
+| heading | slug |
+|---|---|
+| `### 任务卡 1: 创建合同` | `任务卡-1-创建合同` |
+| `### 任务卡 1:创建合同` | `任务卡-1创建合同` |
+| `## 角色与权限速查` | `角色与权限速查` |
+| `### 任务卡 9: 发布 / 停用报表` | `任务卡-9-发布-停用报表` |
+
+> LLM 写 manual 时,**先写 heading,再在目录里粘贴时,严格用同样字符**(冒号后空格、斜杠、顿号全保留)。要么用工具(`gh-slug.py` 之类)生成,要么手写一致。
+
+### 16.10 远程 placeholder URL 必须本地化 (v2.3.0)
+
+`validate-output.py` 第 16 项 `placeholder_url` 扫所有 image / video path(包含 markdown `![]()` / `[VIDEO:]()` 和 HTML `<img src>` / `<video src>` / `<source src>`),路径里出现 `https://placeholder.invalid/` / `https://example.com/` / `<TODO:>` / `<your-...>` 直接 FAIL。
+
+**为什么加**:`_check_screenshot_files_exist` 第 7 项只对**本地相对路径**做 fs 检查(远程 URL 直接 skip — 因为 §16.8 文档化的"external CDN 合法"规则)。ehr 手册 6 张 `https://placeholder.invalid/screenshots/...` 远程占位 + 0 个本地 PNG,通过 7 项但实际没图。第 16 项专门覆盖这个 gap。
+
+**LLM 写 manual 时的硬规则**:
+
+- ✅ 本地相对:`../screenshots/sys/01-list.png`(validator 跑 fs 检查)
+- ✅ 用户访问的前台 URL:`http://localhost:8088/`(白名单,不进本检查)
+- ❌ 占位 URL:`https://placeholder.invalid/...` / `https://example.com/...`
+- ❌ 模板变量:`<your-image-path>` / `<TODO: 截图>`
+
+**与 §14 recording phase 的协同**:草稿评审场景可以临时把分册标 `status: draft-for-review`,但**不能用 placeholder URL 蒙混** — 第 16 项确保你即使在评审阶段也至少知道"这图是占位"。删掉占位引用 / 跑录屏补真图,二选一。

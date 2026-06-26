@@ -115,8 +115,11 @@ class ValidateOutputTests(unittest.TestCase):
             # to pass.
             img_dir = Path(d) / "img"
             img_dir.mkdir()
-            (img_dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
-            (img_dir / "b.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+            # v1.1.0: --unique is now default, so test fixtures must use
+            # distinct content for each PNG (same name = same hash, even
+            # with distinct filenames, fails the unique check).
+            (img_dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16 + b"a")
+            (img_dir / "b.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16 + b"b")
             f = Path(d) / "good.md"
             f.write_text(GOOD)
             r = run([str(f)])
@@ -180,7 +183,10 @@ class ValidateOutputTests(unittest.TestCase):
             # v1.2.0: 13 checks now (added frontmatter_description +
             # unfilled_template_terms).
             # v2.2.0: 14 checks now (added video_outside_steps).
-            self.assertEqual(len(data[0]["checks"]), 14)
+            # v1.1.0: --unique is default + new screenshot_uses_annotated
+            # check added; total now 16 (was 14 pre-1.1.0).
+            # v2.3.0: 19 checks now (added broken_anchors + placeholder_url + task_card_steps_count).
+            self.assertEqual(len(data[0]["checks"]), 19)
             names = [c["name"] for c in data[0]["checks"]]
             self.assertIn("screenshot files exist", names)
         finally:
@@ -192,8 +198,8 @@ class ValidateOutputTests(unittest.TestCase):
             # the new "screenshot files exist" check passes for good.md
             img_dir = Path(d) / "img"
             img_dir.mkdir()
-            (img_dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
-            (img_dir / "b.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+            (img_dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + b"a")
+            (img_dir / "b.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + b"b")
             p1 = Path(d) / "good.md"
             p2 = Path(d) / "bad.md"
             p1.write_text(GOOD)
@@ -274,8 +280,8 @@ class ValidateOutputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             img_dir = Path(d) / "img"
             img_dir.mkdir()
-            (img_dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
-            (img_dir / "b.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+            (img_dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + b"a")
+            (img_dir / "b.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + b"b")
             (img_dir / "c.jpg").write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 8)
             f = Path(d) / "manual.md"
             f.write_text(textwrap.dedent("""\
@@ -696,29 +702,42 @@ class ScreenshotUniqueTests(unittest.TestCase):
             # (--unique flips its own ok=False).
             self.assertFalse(data[0]["ok"])
 
-    def test_unique_off_by_default(self):
-        """v0.4.0: WITHOUT --unique, the check is NOT run, so a
-        file with duplicate-content images still passes overall
-        (backwards compat with v0.3.x manuals)."""
-        # Use the shared GOOD fixture (already passes 7 base checks)
-        # but with TWO identical images injected to prove the
-        # --unique check is what's missing, not the base checks.
+    def test_unique_on_by_default(self):
+        """v1.1.0: --unique is now DEFAULT. Use --no-unique to opt out.
+        A file with duplicate-content images fails the unique check
+        by default (use --unique-allow to whitelist shared assets)."""
         with tempfile.TemporaryDirectory() as d:
             img_dir = Path(d) / "img"
             img_dir.mkdir()
             self._write_png(img_dir / "a.png", b"X" * 32)
             self._write_png(img_dir / "b.png", b"X" * 32)
             f = Path(d) / "good.md"
-            # GOOD references img/a.png and img/b.png (line 71-72).
             f.write_text(GOOD)
-            r = run(["--json", str(f)])  # no --unique
+            r = run(["--json", str(f)])  # no flags
+            data = json.loads(r.stdout)
+            names = [c["name"] for c in data[0]["checks"]]
+            # v1.1.0: --unique is now in the default check set
+            self.assertIn("screenshot unique (no duplicate content)", names)
+            # And it actually catches the duplicate -> ok=False
+            self.assertFalse(data[0]["ok"])
+
+    def test_unique_no_unique_flag(self):
+        """v1.1.0: --no-unique explicitly disables the unique check
+        (backwards compat with v0.3.x / v0.4.x behavior)."""
+        with tempfile.TemporaryDirectory() as d:
+            img_dir = Path(d) / "img"
+            img_dir.mkdir()
+            self._write_png(img_dir / "a.png", b"X" * 32)
+            self._write_png(img_dir / "b.png", b"X" * 32)
+            f = Path(d) / "good.md"
+            f.write_text(GOOD)
+            r = run(["--json", "--no-unique", str(f)])
             data = json.loads(r.stdout)
             names = [c["name"] for c in data[0]["checks"]]
             self.assertNotIn(
                 "screenshot unique (no duplicate content)", names,
-                "unique check should be opt-in; off by default"
+                "unique check should be off when --no-unique is passed"
             )
-            self.assertTrue(data[0]["ok"])
 
     def test_unique_allow_whitelist(self):
         """v0.4.0: --unique-allow=logo.png,branding.png lets you
@@ -998,6 +1017,415 @@ class VideoOutsideStepsTests(unittest.TestCase):
         )
         c = self._vs_check(text)
         self.assertTrue(c["ok"], msg=str(c))
+
+
+
+
+class ScreenshotUsesAnnotatedTests(unittest.TestCase):
+    """v1.1.0: alt text "红框:..." / "箭头:..." must reference the
+    `.annotated.png` sibling, not the bare `<name>.png`. This check
+    catches the ehr-manual gap where alt text claimed a red box but
+    the image was the unannotated PNG.
+    """
+
+    @staticmethod
+    def _write_png(path: Path, content: bytes) -> None:
+        path.write_bytes(b"\x89PNG\r\n\x1a\n" + content)
+
+    @staticmethod
+    def _make_manual(d: str, body: str) -> Path:
+        # Minimal skeleton with all required sections so the OTHER
+        # checks pass; we only care about the new check.
+        text = """---
+title: t
+module: m
+module_code: m
+description: d
+version: 1.0.0
+version_date: 2026-01-01
+audience: x
+task: x
+prerequisites: x
+related: []
+---
+## 文档说明
+## 读法指南
+## 目录
+- [x](#x)
+## 修订历史
+## 术语表
+## 系统概述
+## 快速开始
+## 角色与权限速查
+| 角色 | 权限 |
+| --- | --- |
+| x | y |
+## 任务卡
+""" + body + """
+## 字段参考
+## 配置参考
+## 故障速查
+## 常见问题
+## 附录 A: 错误码速查
+| a | b | c | d | e | f |
+| --- | --- | --- | --- | --- | --- |
+## 附录 B: 联系支持
+"""
+        f = Path(d) / "manual.md"
+        f.write_text(text)
+        return f
+
+    def test_bare_png_with_red_box_alt_fails(self):
+        """alt text mentions red box, but image is bare .png and
+        the .annotated.png sibling exists on disk -> FAIL."""
+        with tempfile.TemporaryDirectory() as d:
+            img_dir = Path(d) / "img"
+            img_dir.mkdir()
+            self._write_png(img_dir / "01-list.png", b"a" * 32)
+            self._write_png(img_dir / "01-list.annotated.png", b"annotated" * 8)
+            f = self._make_manual(
+                d,
+                "### 任务卡 1: x\n\n> ⚠️ 操作前必看\n- x\n\n**适用角色**: x\n**前置条件**: x\n**入口**: x\n\n#### 步骤\n\n1. 点这里![红框:点登录](img/01-list.png)\n",
+            )
+            r = run(["--json", str(f)])
+            data = json.loads(r.stdout)
+            checks = {c["name"]: c for c in data[0]["checks"]}
+            ann = checks.get("screenshot_uses_annotated (alt text matches annotated sibling)")
+            self.assertIsNotNone(ann)
+            self.assertFalse(ann["ok"])
+            self.assertEqual(ann["flagged"], 1)
+            self.assertEqual(ann["offenders"][0]["ref"], "img/01-list.png")
+            self.assertTrue(ann["offenders"][0]["annotated_sibling"].endswith("img/01-list.annotated.png"))
+            self.assertIn("红框", ann["offenders"][0]["alt"])
+
+    def test_annotated_png_with_red_box_alt_passes(self):
+        """alt text mentions red box AND image is .annotated.png -> pass."""
+        with tempfile.TemporaryDirectory() as d:
+            img_dir = Path(d) / "img"
+            img_dir.mkdir()
+            self._write_png(img_dir / "01-list.annotated.png", b"annotated" * 8)
+            f = self._make_manual(
+                d,
+                "### 任务卡 1: x\n\n> ⚠️ 操作前必看\n- x\n\n**适用角色**: x\n**前置条件**: x\n**入口**: x\n\n#### 步骤\n\n1. 点这里![红框:点登录](img/01-list.annotated.png)\n",
+            )
+            r = run(["--json", str(f)])
+            data = json.loads(r.stdout)
+            checks = {c["name"]: c for c in data[0]["checks"]}
+            ann = checks.get("screenshot_uses_annotated (alt text matches annotated sibling)")
+            self.assertIsNotNone(ann)
+            self.assertTrue(ann["ok"])
+            self.assertEqual(ann["flagged"], 0)
+
+    def test_bare_png_with_neutral_alt_passes(self):
+        """alt text doesn't mention red box/arrow/etc -> pass even if
+        .annotated.png exists (we don't second-guess neutral alts)."""
+        with tempfile.TemporaryDirectory() as d:
+            img_dir = Path(d) / "img"
+            img_dir.mkdir()
+            self._write_png(img_dir / "01-list.png", b"a" * 32)
+            self._write_png(img_dir / "01-list.annotated.png", b"annotated" * 8)
+            f = self._make_manual(
+                d,
+                "### 任务卡 1: x\n\n> ⚠️ 操作前必看\n- x\n\n**适用角色**: x\n**前置条件**: x\n**入口**: x\n\n#### 步骤\n\n1. 点这里![截图](img/01-list.png)\n",
+            )
+            r = run(["--json", str(f)])
+            data = json.loads(r.stdout)
+            checks = {c["name"]: c for c in data[0]["checks"]}
+            ann = checks["screenshot_uses_annotated (alt text matches annotated sibling)"]
+            self.assertTrue(ann["ok"])
+            self.assertEqual(ann["flagged"], 0)
+
+    def test_no_annotated_sibling_passes(self):
+        """alt mentions red box, but no .annotated.png sibling exists
+        (recorder in screenshot-only mode) -> pass (no fix possible)."""
+        with tempfile.TemporaryDirectory() as d:
+            img_dir = Path(d) / "img"
+            img_dir.mkdir()
+            self._write_png(img_dir / "01-list.png", b"a" * 32)
+            f = self._make_manual(
+                d,
+                "### 任务卡 1: x\n\n> ⚠️ 操作前必看\n- x\n\n**适用角色**: x\n**前置条件**: x\n**入口**: x\n\n#### 步骤\n\n1. 点这里![红框:点登录](img/01-list.png)\n",
+            )
+            r = run(["--json", str(f)])
+            data = json.loads(r.stdout)
+            checks = {c["name"]: c for c in data[0]["checks"]}
+            ann = checks["screenshot_uses_annotated (alt text matches annotated sibling)"]
+            self.assertTrue(ann["ok"])
+            self.assertEqual(ann["flagged"], 0)
+
+    def test_annotated_relaxed_flag(self):
+        """--annotated-relaxed downgrades the check to a warning
+        (ok=True even when offenders exist)."""
+        with tempfile.TemporaryDirectory() as d:
+            img_dir = Path(d) / "img"
+            img_dir.mkdir()
+            self._write_png(img_dir / "01-list.png", b"a" * 32)
+            self._write_png(img_dir / "01-list.annotated.png", b"annotated" * 8)
+            f = self._make_manual(
+                d,
+                "### 任务卡 1: x\n\n> ⚠️ 操作前必看\n- x\n\n**适用角色**: x\n**前置条件**: x\n**入口**: x\n\n#### 步骤\n\n1. 点这里![红框:点登录](img/01-list.png)\n",
+            )
+            r = run(["--json", "--annotated-relaxed", str(f)])
+            data = json.loads(r.stdout)
+            checks = {c["name"]: c for c in data[0]["checks"]}
+            ann = checks["screenshot_uses_annotated (alt text matches annotated sibling)"]
+            self.assertTrue(ann["ok"])
+            self.assertEqual(ann["flagged"], 1)
+            self.assertTrue(ann["relaxed"])
+
+    def test_arrow_keyword(self):
+        """箭头 keyword also fires the check."""
+        with tempfile.TemporaryDirectory() as d:
+            img_dir = Path(d) / "img"
+            img_dir.mkdir()
+            self._write_png(img_dir / "02-detail.png", b"a" * 32)
+            self._write_png(img_dir / "02-detail.annotated.png", b"annotated" * 8)
+            f = self._make_manual(
+                d,
+                "### 任务卡 1: x\n\n> ⚠️ 操作前必看\n- x\n\n**适用角色**: x\n**前置条件**: x\n**入口**: x\n\n#### 步骤\n\n1. 点这里![箭头:点这里](img/02-detail.png)\n",
+            )
+            r = run(["--json", str(f)])
+            data = json.loads(r.stdout)
+            checks = {c["name"]: c for c in data[0]["checks"]}
+            ann = checks["screenshot_uses_annotated (alt text matches annotated sibling)"]
+            self.assertFalse(ann["ok"])
+            self.assertEqual(ann["flagged"], 1)
+
+
+
+
+# v2.3.0: anchor-internal-link check
+class BrokenAnchorTests(unittest.TestCase):
+    """v2.3.0: §3 — every internal `](#slug)` link must resolve to a
+    real heading slug. The 2026-06 ehr audit found 8 broken anchors
+    in the overview manual (heading "任务卡 1: 确认" with link
+    "#任务卡-1确认", missing the space)."""
+
+    def _check(self, text: str) -> dict:
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write(text)
+            path = f.name
+        try:
+            data = json.loads(run(["--json", path]).stdout)
+        finally:
+            os.unlink(path)
+        return next(c for c in data[0]["checks"]
+                    if c["name"].startswith("broken_anchors"))
+
+    def test_matching_anchors_pass(self):
+        text = """
+### 任务卡 1: 创建合同
+
+[link](#任务卡-1-创建合同)
+
+### 任务卡 2: 删除合同
+
+[link](#任务卡-2-删除合同)
+"""
+        c = self._check(text)
+        self.assertTrue(c["ok"], msg=str(c))
+        self.assertEqual(c["flagged"], 0)
+
+    def test_missing_space_in_anchor_fails(self):
+        # The exact ehr bug: heading has space after `:`,
+        # link slug drops the space.
+        text = """
+### 任务卡 1: 创建合同
+
+[link](#任务卡-1创建合同)
+"""
+        c = self._check(text)
+        self.assertFalse(c["ok"], msg=str(c))
+        self.assertEqual(c["flagged"], 1)
+        self.assertEqual(c["offenders"][0]["ref"], "任务卡-1创建合同")
+
+    def test_typo_in_anchor_fails(self):
+        text = """
+### 任务卡 1: 创建合同
+
+[link](#任务卡-1-创建合)
+"""
+        c = self._check(text)
+        self.assertFalse(c["ok"])
+        self.assertEqual(c["flagged"], 1)
+
+    def test_code_fence_skipped(self):
+        # Anchors in code blocks are example documentation, not real links.
+        text = """
+### 任务卡 1: 创建合同
+
+```
+[link](#nonexistent)
+```
+
+[real link](#任务卡-1-创建合同)
+"""
+        c = self._check(text)
+        self.assertTrue(c["ok"], msg=str(c))
+
+
+# v2.3.0: placeholder URL check
+class PlaceholderUrlTests(unittest.TestCase):
+    """v2.3.0: §16 — asset paths that look like obvious placeholders
+    (placeholder.invalid, example.com, <TODO:>, <your-...>) must be
+    rejected. _check_screenshot_files_exist only checks local relative
+    paths, so the ehr manual's 6 `https://placeholder.invalid/...`
+    references slipped through."""
+
+    def _check(self, text: str) -> dict:
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write(text)
+            path = f.name
+        try:
+            data = json.loads(run(["--json", path]).stdout)
+        finally:
+            os.unlink(path)
+        return next(c for c in data[0]["checks"]
+                    if c["name"].startswith("placeholder_url"))
+
+    def test_local_relative_paths_pass(self):
+        text = "![a](../screenshots/sys/01.png)\n![b](img/b.jpg)\n"
+        c = self._check(text)
+        self.assertTrue(c["ok"], msg=str(c))
+        self.assertEqual(c["flagged"], 0)
+
+    def test_legit_frontend_url_passes(self):
+        # http://localhost:8088/ is the user-facing entry per
+        # §2.7.1 类 7 — not a placeholder.
+        text = "![a](http://localhost:8088/assets/logo.png)\n"
+        c = self._check(text)
+        self.assertTrue(c["ok"], msg=str(c))
+
+    def test_placeholder_invalid_fails(self):
+        text = "![a](https://placeholder.invalid/screenshots/sys/01.png)\n"
+        c = self._check(text)
+        self.assertFalse(c["ok"])
+        self.assertEqual(c["flagged"], 1)
+        self.assertIn("placeholder.invalid", c["offenders"][0]["path"])
+
+    def test_example_com_fails(self):
+        text = "![a](https://example.com/foo.png)\n"
+        c = self._check(text)
+        self.assertFalse(c["ok"])
+        self.assertEqual(c["flagged"], 1)
+
+    def test_html_img_with_placeholder_fails(self):
+        text = '<img src="https://placeholder.invalid/x.png">\n'
+        c = self._check(text)
+        self.assertFalse(c["ok"])
+        self.assertEqual(c["flagged"], 1)
+
+    def test_html_video_with_placeholder_fails(self):
+        text = '<video src="https://placeholder.invalid/flow.mp4"></video>\n'
+        c = self._check(text)
+        self.assertFalse(c["ok"])
+        self.assertEqual(c["flagged"], 1)
+
+    def test_code_fence_skipped(self):
+        text = """
+```markdown
+![doc example](https://placeholder.invalid/foo.png)
+```
+
+![real local](img/ok.png)
+"""
+        c = self._check(text)
+        self.assertTrue(c["ok"], msg=str(c))
+
+
+# v2.3.0: one-task-card-one-operation check
+class TaskCardStepsCountTests(unittest.TestCase):
+    """v2.3.0: §2.1 — one task card = one specific operation. Each
+    `### 任务卡 N:` block must contain exactly one `#### 步骤`
+    subsection. The ehr manual's report task card 9 (发布/停用) had
+    two `#### 步骤` blocks."""
+
+    def _check(self, text: str) -> dict:
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write(text)
+            path = f.name
+        try:
+            data = json.loads(run(["--json", path]).stdout)
+        finally:
+            os.unlink(path)
+        return next(c for c in data[0]["checks"]
+                    if c["name"].startswith("task_card_steps_count"))
+
+    def test_single_steps_block_passes(self):
+        text = """
+### 任务卡 1: 创建合同
+
+#### 步骤
+
+1. 打开页面
+2. 填写表单
+"""
+        c = self._check(text)
+        self.assertTrue(c["ok"], msg=str(c))
+        self.assertEqual(c["well_formed_count"], 1)
+
+    def test_two_steps_blocks_fails(self):
+        # The exact ehr bug: 发布/停用 packed into one card.
+        text = """
+### 任务卡 9: 发布 / 停用报表
+
+#### 步骤(发布)
+
+1. 点发布
+
+#### 步骤(停用)
+
+1. 点停用
+"""
+        c = self._check(text)
+        self.assertFalse(c["ok"])
+        self.assertEqual(c["flagged"], 1)
+        self.assertEqual(c["offenders"][0]["steps_count"], 2)
+        self.assertIn("任务卡 9", c["offenders"][0]["card"])
+
+    def test_no_steps_blocks_passes(self):
+        # Card uses 演示视频 only — 0 steps is OK.
+        text = """
+### 任务卡 1: 视频演示
+
+#### 演示视频
+
+[VIDEO: demo](demo.mp4)
+"""
+        c = self._check(text)
+        self.assertTrue(c["ok"], msg=str(c))
+        # 0 well-formed because the check only counts cards with
+        # exactly 1 steps block, but no offenders either.
+        self.assertEqual(c["flagged"], 0)
+
+    def test_mixed_cards(self):
+        # 3 cards, 1 well-formed, 1 with 2 step blocks, 1 with 0.
+        text = """
+### 任务卡 1: well
+
+#### 步骤
+
+1. a
+
+### 任务卡 2: bad
+
+#### 步骤(a)
+
+1. x
+
+#### 步骤(b)
+
+1. y
+
+### 任务卡 3: empty
+
+正文无步骤段。
+"""
+        c = self._check(text)
+        self.assertFalse(c["ok"])
+        self.assertEqual(c["well_formed_count"], 1)
+        self.assertEqual(c["flagged"], 1)
+        self.assertEqual(c["total_task_cards"], 3)
 
 
 if __name__ == "__main__":
