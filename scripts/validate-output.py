@@ -44,6 +44,10 @@ v1.1.0 — added the 9th check: "screenshot_uses_annotated". Closes
 v0.4.0 — added the 8th check: "screenshot unique" (now default
  since v1.1.0; pre-1.1.0 was opt-in via --unique).
 v1.1.0 — added the HARD GATE pre-flight: `_check_recording_phase_actually_ran`.
+v1.2.0 — added two post-gate checks: `manifest_disk_consistency` (manifest
+ asset inventory must match disk state; FAIL on manifest-only paths) and
+ `file_type_sanity` (catch the 'manual.md is actually HTML' failure
+ mode that bypassed v1.1.0 in the 2026-06 ehr audit).
  The gate reads `docs/user-manual/recording_manifest.json` (written by the
  recorder skill via `manual_helper write-recording-manifest`). Without that
  file (or with a manifest that says dev server was unreachable, or recorder
@@ -1012,6 +1016,174 @@ def _check_recording_phase_actually_ran(md_path: Path) -> dict:
     }
 
 
+# v1.2.0: manifest_disk_consistency. The manifest is a snapshot
+# of disk state at recording time. If a `recording_manifest.json`
+# says "we wrote screenshot X" but X is no longer on disk (someone
+# rm'd it, or it was overwritten by a different agent run), the
+# manual is referencing a ghost. Conversely, if the disk has
+# screenshots that the manifest never claimed, the agent that
+# recorded them bypassed the manifest contract — the recorder
+# phase did not run cleanly.
+#
+# Found in the 2026-06 ehr audit (post-v1.1.0): manifest listed
+# `screenshots/blacklist/blacklist-nav.png` (and ~17 other files),
+# but `screenshots/blacklist/` was entirely empty on disk. The
+# manifest was stale; markdown references were broken; the manual
+# still passed every v1.1.0 check because the gate only validated
+# manifest *content*, not *consistency with disk*.
+def _check_manifest_disk_consistency(md_path: Path, text: str) -> dict:
+    """v1.2.0: verify the manifest's asset inventory matches disk.
+
+    Two failure modes:
+      - `manifest_only`: path is in the manifest but NOT on disk.
+        Manual will fail the screenshot files exist check too, but
+        we surface it here with the manifest contract angle.
+      - `disk_only`: path is on disk but NOT in the manifest. Likely
+        an LLM agent (or human) wrote extra PNGs without going
+        through the recorder skill. We do not fail on this; we just
+        report it. Treat as WARN (not FAIL) — the manual itself
+        may still be valid; this is a process-hygiene signal.
+    """
+    import json as _json
+    # Find manifest (same logic as _check_recording_phase_actually_ran)
+    manifest = None
+    cur = md_path.resolve().parent
+    while cur != cur.parent:
+        c = cur / "recording_manifest.json"
+        if c.exists():
+            manifest = c
+            break
+        if cur.name == "user-manual":
+            break
+        cur = cur.parent
+    if manifest is None:
+        # No manifest; v1.1.0 hard gate would have already blocked.
+        # Be a soft no-op so this check can run independently.
+        return {
+            "name": "manifest_disk_consistency (v1.2.0)",
+            "hits": 0,
+            "threshold": 0,
+            "comparison": "eq",
+            "ok": True,
+            "manifest_path": None,
+            "manifest_only": [],
+            "disk_only": [],
+            "note": "no manifest present; pre-flight gate owns this case",
+        }
+    try:
+        data = _json.loads(manifest.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {
+            "name": "manifest_disk_consistency (v1.2.0)",
+            "hits": 0,
+            "threshold": 0,
+            "comparison": "eq",
+            "ok": True,
+            "manifest_path": str(manifest),
+            "manifest_only": [],
+            "disk_only": [],
+            "note": "manifest unreadable; pre-flight gate owns this case",
+        }
+    # Collect manifest asset paths (relative to manifest dir).
+    manifest_dir = manifest.parent
+    manifest_paths: set[Path] = set()
+    for kind in ("screenshots", "videos", "ai_annotated"):
+        for rel in data.get("assets", {}).get(kind, []) or []:
+            manifest_paths.add((manifest_dir / rel).resolve())
+    # On-disk paths in the screenshots/ tree.
+    screenshots_dir = manifest_dir / "screenshots"
+    disk_paths: set[Path] = set()
+    if screenshots_dir.exists():
+        for p in screenshots_dir.rglob("*"):
+            if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm"}:
+                disk_paths.add(p.resolve())
+    manifest_only = sorted(str(p.relative_to(manifest_dir)) for p in manifest_paths - disk_paths)
+    disk_only = sorted(str(p.relative_to(manifest_dir)) for p in disk_paths - manifest_paths)
+    return {
+        "name": "manifest_disk_consistency (v1.2.0)",
+        "hits": len(manifest_paths & disk_paths),
+        "threshold": len(manifest_paths),
+        "comparison": "ge",
+        # FAIL if any manifest-listed path is missing on disk.
+        "ok": (len(manifest_only) == 0),
+        "manifest_path": str(manifest),
+        "manifest_only": manifest_only[:5],
+        "disk_only": disk_only[:5],
+        "manifest_only_count": len(manifest_only),
+        "disk_only_count": len(disk_only),
+    }
+
+
+# v1.2.0: file_type_sanity. The markdown file passed to validator
+# must actually be a markdown file, not an HTML viewer template,
+# SVG, or some other format that happened to be renamed .md.
+#
+# Found in the 2026-06 ehr audit (post-v1.1.0): `manual/user-manual.md`
+# was overwritten with the full HTML viewer template
+# (`<!DOCTYPE html>...<script>...</html>`, 4722 lines, 116KB).
+# The hard gate didn't catch it (manifest existed; the HTML was
+# happily "validated" as if it were markdown). This check is a
+# cheap first-line defense.
+def _check_file_type_sanity(md_path: Path, text: str) -> dict:
+    """v1.2.0: catch the 'manual/<x>.md is actually HTML' failure mode.
+
+    A valid user-manual .md must start with either a YAML
+    frontmatter block (`---\n`), a top-level heading (`# ...`),
+    or a few blank lines / copyright lines, then `# ...`. Anything
+    that looks like a full document of another type is a red flag.
+    """
+    head = text[:2000]
+    # Heuristics (cheap, deterministic, no parsing).
+    looks_like_html = any(s in head[:200] for s in (
+        "<!DOCTYPE", "<html", "<head>", "<body>", "<svg",
+    ))
+    looks_like_xml = head.lstrip().startswith("<?xml")
+    looks_like_json = head.lstrip().startswith("{") and '"' in head[:100]
+    looks_like_pdf = head.startswith("%PDF-")
+    looks_like_binary = any(b in head.encode("utf-8", errors="replace")[:200] for b in (b"\x00",))
+    has_frontmatter = head.startswith("---\n")
+    has_h1 = any(line.startswith("# ") for line in head.splitlines()[:50])
+    if looks_like_html or looks_like_xml or looks_like_json or looks_like_pdf or looks_like_binary:
+        return {
+            "name": "file_type_sanity (v1.2.0)",
+            "hits": 0,
+            "threshold": 1,
+            "comparison": "ge",
+            "ok": False,
+            "reason": "not_markdown",
+            "detail": (
+                f"this file does not look like markdown. "
+                f"html={looks_like_html} xml={looks_like_xml} "
+                f"json={looks_like_json} pdf={looks_like_pdf} "
+                f"binary={looks_like_binary}. The .md extension was "
+                "probably applied to a non-markdown document. "
+                "Restore from git or regenerate."
+            ),
+        }
+    if not has_frontmatter and not has_h1:
+        return {
+            "name": "file_type_sanity (v1.2.0)",
+            "hits": 0,
+            "threshold": 1,
+            "comparison": "ge",
+            "ok": False,
+            "reason": "no_frontmatter_or_h1",
+            "detail": (
+                "no YAML frontmatter (---\n) and no top-level "
+                "# heading in the first 50 lines. This may not be a "
+                "user-manual markdown file."
+            ),
+        }
+    return {
+        "name": "file_type_sanity (v1.2.0)",
+        "hits": 1,
+        "threshold": 1,
+        "comparison": "ge",
+        "ok": True,
+        "detail": "looks like markdown (frontmatter or H1 present)",
+    }
+
+
 def _is_placeholder_png(path: Path) -> bool:
     """v0.3.2: a PNG file is a 'placeholder' if its dimensions are < 50x50.
     Real screenshots are 1280x800+; 1×1 or 32×32 etc. means the LLM
@@ -1511,6 +1683,33 @@ def validate_file(path):
         "offenders": tcs_check["offenders"],
     })
     all_ok = all_ok and tcs_check["ok"]
+    # v1.2.0: manifest asset inventory must match disk state.
+    mdc_check = _check_manifest_disk_consistency(path, text)
+    results.append({
+        "name": mdc_check["name"],
+        "hits": mdc_check["hits"],
+        "threshold": mdc_check["threshold"],
+        "comparison": mdc_check["comparison"],
+        "ok": mdc_check["ok"],
+        "manifest_path": mdc_check.get("manifest_path"),
+        "manifest_only": mdc_check.get("manifest_only", []),
+        "disk_only": mdc_check.get("disk_only", []),
+        "manifest_only_count": mdc_check.get("manifest_only_count", 0),
+        "disk_only_count": mdc_check.get("disk_only_count", 0),
+    })
+    all_ok = all_ok and mdc_check["ok"]
+    # v1.2.0: ensure the .md is actually a markdown file.
+    fts_check = _check_file_type_sanity(path, text)
+    results.append({
+        "name": fts_check["name"],
+        "hits": fts_check["hits"],
+        "threshold": fts_check["threshold"],
+        "comparison": fts_check["comparison"],
+        "ok": fts_check["ok"],
+        "reason": fts_check.get("reason", ""),
+        "detail": fts_check.get("detail", ""),
+    })
+    all_ok = all_ok and fts_check["ok"]
     # v0.4.0: opt-in unique-content check. Pop a module-level flag
     # (set by main from --unique) so test harnesses can override.
     if globals().get("UNIQUE_CHECK_ENABLED"):

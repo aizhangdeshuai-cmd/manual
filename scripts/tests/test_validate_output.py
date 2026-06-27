@@ -214,7 +214,8 @@ class ValidateOutputTests(unittest.TestCase):
             # v1.1.0: --unique is default + new screenshot_uses_annotated
             # check added; total now 16 (was 14 pre-1.1.0).
             # v2.3.0: 19 checks now (added broken_anchors + placeholder_url + task_card_steps_count).
-            self.assertEqual(len(data[0]["checks"]), 19)
+            # v1.2.0: 21 checks now (added manifest_disk_consistency + file_type_sanity).
+            self.assertEqual(len(data[0]["checks"]), 21)
             names = [c["name"] for c in data[0]["checks"]]
             self.assertIn("screenshot files exist", names)
         finally:
@@ -1649,3 +1650,171 @@ class RecordingPhaseActuallyRanTests(unittest.TestCase):
                 "write-recording-manifest",
             ]:
                 self.assertIn(step, r.stderr, msg=f"banner missing step: {step}")
+
+
+
+# v1.2.0: manifest_disk_consistency — manifest must list only files
+# that are on disk, and report files on disk that aren't in the
+# manifest.
+class ManifestDiskConsistencyTests(unittest.TestCase):
+    """v1.2.0: post-gate check that catches the 2026-06 ehr failure
+    mode where manifest listed ~20 PNGs that no longer existed on
+    disk. The v1.1.0 gate only validated manifest *content*; this
+    check validates manifest *consistency with disk state*.
+    """
+
+    def _setup(self, tmp, *, manifest, on_disk):
+        manual_dir = tmp / "docs" / "user-manual" / "manual"
+        manual_dir.mkdir(parents=True, exist_ok=True)
+        (manual_dir / "x.md").write_text(
+            "---\ntitle: X\nmodule: x\ndescription: x for manifest test\n---\n\n# X\n",
+            encoding="utf-8",
+        )
+        for rel in on_disk:
+            p2 = tmp / "docs/user-manual" / rel
+            p2.parent.mkdir(parents=True, exist_ok=True)
+            p2.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
+        if manifest is not None:
+            (tmp / "docs/user-manual/recording_manifest.json").write_text(
+                json.dumps(manifest, indent=2), encoding="utf-8",
+            )
+        return manual_dir / "x.md"
+
+    def test_manifest_only_path_blocks(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            mf = {
+                "schema_version": "1.0",
+                "recorder_cli_exit": 0,
+                "dev_server": {"reachable": True, "readiness_status": "green"},
+                "assets": {
+                    "screenshots": ["screenshots/x/01.png"],  # NOT on disk
+                    "videos": [],
+                    "ai_annotated": [],
+                },
+                "totals": {"screenshots": 1, "videos": 0, "ai_annotated": 0},
+            }
+            md = self._setup(tmp, manifest=mf, on_disk=[])
+            r = run_raw(["--no-hard-gate", "--json", str(md)])
+            data = json.loads(r.stdout)
+            check = next((c for c in data[0]["checks"]
+                          if c["name"].startswith("manifest_disk_consistency")), None)
+            self.assertIsNotNone(check)
+            self.assertFalse(check["ok"])
+            self.assertIn("screenshots/x/01.png", check["manifest_only"])
+
+    def test_disk_only_path_is_warn_not_fail(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            mf = {
+                "schema_version": "1.0",
+                "recorder_cli_exit": 0,
+                "dev_server": {"reachable": True, "readiness_status": "green"},
+                "assets": {"screenshots": [], "videos": [], "ai_annotated": []},
+                "totals": {"screenshots": 0, "videos": 0, "ai_annotated": 0},
+            }
+            md = self._setup(tmp, manifest=mf, on_disk=["screenshots/x/orphan.png"])
+            r = run_raw(["--no-hard-gate", "--json", str(md)])
+            data = json.loads(r.stdout)
+            check = next((c for c in data[0]["checks"]
+                          if c["name"].startswith("manifest_disk_consistency")), None)
+            self.assertIsNotNone(check)
+            # disk-only is reported but not a hard fail
+            self.assertTrue(check["ok"])
+            self.assertIn("screenshots/x/orphan.png", check["disk_only"])
+
+    def test_consistent_manifest_passes(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            mf = {
+                "schema_version": "1.0",
+                "recorder_cli_exit": 0,
+                "dev_server": {"reachable": True, "readiness_status": "green"},
+                "assets": {"screenshots": ["screenshots/x/01.png"], "videos": [], "ai_annotated": []},
+                "totals": {"screenshots": 1, "videos": 0, "ai_annotated": 0},
+            }
+            md = self._setup(tmp, manifest=mf, on_disk=["screenshots/x/01.png"])
+            r = run_raw(["--no-hard-gate", "--json", str(md)])
+            data = json.loads(r.stdout)
+            check = next((c for c in data[0]["checks"]
+                          if c["name"].startswith("manifest_disk_consistency")), None)
+            self.assertIsNotNone(check)
+            self.assertTrue(check["ok"])
+            self.assertEqual(check["manifest_only"], [])
+            self.assertEqual(check["disk_only"], [])
+
+    def test_no_manifest_is_noop(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            md = self._setup(tmp, manifest=None, on_disk=["screenshots/x/01.png"])
+            r = run_raw(["--no-hard-gate", "--json", str(md)])
+            data = json.loads(r.stdout)
+            check = next((c for c in data[0]["checks"]
+                          if c["name"].startswith("manifest_disk_consistency")), None)
+            self.assertIsNotNone(check)
+            # Without a manifest, the pre-flight gate owns the failure case.
+            # This check should be a no-op (ok=True) so it can run
+            # independently of the gate.
+            self.assertTrue(check["ok"])
+
+
+# v1.2.0: file_type_sanity — catch the "manual.md is actually HTML"
+# failure mode that bypassed v1.1.0 in the ehr 2026-06 audit.
+class FileTypeSanityTests(unittest.TestCase):
+    """v1.2.0: cheap first-line defense against non-markdown files
+    being passed as .md. Without this, a file that was overwritten
+    with an HTML viewer template would pass every other check
+    (the pre-flight gate only validates manifest content; the rest
+    of the regex-based checks happily match <h1>...</h1> as if it
+    were a markdown heading).
+    """
+
+    def _md(self, d, name, body):
+        p = Path(d) / name
+        p.write_text(body, encoding="utf-8")
+        return p
+
+    def test_html_file_blocks(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = self._md(d, "x.md",
+                "<!DOCTYPE html>\n<html><head><title>X</title></head>\n"
+                "<body><h1>X</h1></body></html>")
+            r = run_raw(["--no-hard-gate", "--json", str(f)])
+            data = json.loads(r.stdout)
+            check = next((c for c in data[0]["checks"]
+                          if c["name"].startswith("file_type_sanity")), None)
+            self.assertIsNotNone(check)
+            self.assertFalse(check["ok"])
+            self.assertEqual(check["reason"], "not_markdown")
+
+    def test_valid_markdown_passes(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = self._md(d, "x.md",
+                "---\ntitle: X\nmodule: x\ndescription: x\n---\n\n# X\n")
+            r = run_raw(["--no-hard-gate", "--json", str(f)])
+            data = json.loads(r.stdout)
+            check = next((c for c in data[0]["checks"]
+                          if c["name"].startswith("file_type_sanity")), None)
+            self.assertIsNotNone(check)
+            self.assertTrue(check["ok"])
+
+    def test_no_frontmatter_or_h1_blocks(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = self._md(d, "x.md", "just some prose\nno structure at all")
+            r = run_raw(["--no-hard-gate", "--json", str(f)])
+            data = json.loads(r.stdout)
+            check = next((c for c in data[0]["checks"]
+                          if c["name"].startswith("file_type_sanity")), None)
+            self.assertIsNotNone(check)
+            self.assertFalse(check["ok"])
+            self.assertEqual(check["reason"], "no_frontmatter_or_h1")
+
+    def test_xml_blocks(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = self._md(d, "x.md", "<?xml version=\"1.0\"?>\n<root/>")
+            r = run_raw(["--no-hard-gate", "--json", str(f)])
+            data = json.loads(r.stdout)
+            check = next((c for c in data[0]["checks"]
+                          if c["name"].startswith("file_type_sanity")), None)
+            self.assertIsNotNone(check)
+            self.assertFalse(check["ok"])

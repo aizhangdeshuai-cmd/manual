@@ -1396,3 +1396,20 @@ banner 内容(多行,故意的 —— 要让 LLM agent / 人类 reviewer 真的�
 - "screenshot files exist"(v0.3.1 引入)只看文件是否在磁盘 + 尺寸 ≥ 50×50,80×60 灰图正好过
 
 manifest 闸 = "录屏真跑" 的唯一可信信号,因为它把 dev server 联通状态、recorder CLI 退出码、产物清单绑一份带 timestamp 的机器可读合同。
+
+
+### 16.13 v1.2.0 — manifest_disk_consistency + file_type_sanity (post-gate checks)
+
+v1.1.0 的硬闸只验证 manifest 文件**自身**的内容(schema / dev server / recorder exit / screenshot count),但**没**验证 manifest 列出的图是否真的在 disk 上。ehr 2026-06 暴露了这个 gap:当时 manifest 列出 18 张图(来自 §14 跑过的那次),但 14:00→15:09 中间 disk 上 blacklist 目录被清空(可能用户 `rm -rf` 失误),`screenshots/files exist` check 在 blacklist 分册上**还能继续工作**(因为它只看 markdown 引用的图是否存在 — 但 markdown 引用的是 `[SCREENSHOT: blacklist-nav]` 占位符,validator 报"unreplaced",而不是报"manifest 撒谎")。
+
+v1.2.0 加两个**post-gate** check 在硬闸通过后跑:
+
+**`manifest_disk_consistency` (FAIL 模式)**: 读 manifest 列的 `assets.screenshots` 列表,每条 path 在 `docs/user-manual/screenshots/` 下必须实际存在。manifest 列了但 disk 没有 → **FAIL**(manifest 撒谎,manual 引用的图实际不存在)。disk 上有但 manifest 没列的(`_video_buffer/` 临时片段,或 hand-painted extras)→ **WARN**(不是硬失败,但用 `disk_only_count` 字段报告)。
+
+**`file_type_sanity` (FAIL 模式)**: markdown 文件前 200 字符里如果出现 `<!DOCTYPE` / `<html` / `<head>` / `<body>` / `<svg` / `<?xml` / `{` 开头配 JSON 闭合 / `%PDF-` / 任何 NUL byte → **FAIL**。同时要求前 50 行里至少有 YAML frontmatter (`---
+`) 或 H1 (`# `)。ehr 2026-06 那次 `manual/user-manual.md` 被覆盖成 viewer 的 HTML 模板(4722 行 116KB),v1.1.0 闸因为 manifest 存在所以**通过**,然后 v1.1.0 的其他 regex check 把 `<h1>` 当 markdown 标题继续跑,看上去 "校验过了" — 但实际手册是 HTML。v1.2.0 这一道把这种破坏**首行就 FAIL**。
+
+**设计上的 trade-off**: 这两个 check 是**便宜的**防御(几十行代码),但覆盖的失败模式**只能 catch 一类破坏**(LLM/脚本把 .md 文件替换成别的东西 / manifest 和 disk 漂移)。更深层的破坏(LLM 写的"假"中文、瞎编的接口路径、错的权限矩阵)v1.2.0 抓不到 — 那些需要 §2.7.1 audience_leak + 人工 review,validator 防不住。
+
+**CI 友好**: 两个 check 都默认开启,无 opt-out flag。manifest 撒谎或 manual.md 是 HTML 在 SKILL §16.12 的硬闸失效时(manifest 还在但内容是 stale),这两道是最后一道防线。
+

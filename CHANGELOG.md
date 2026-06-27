@@ -1,4 +1,73 @@
 
+## 1.2.0 (2026-06-27) — manifest_disk_consistency + file_type_sanity post-gate checks
+
+A second review of the ehr-generated manual surfaced two more
+failure modes the v1.1.0 hard gate did NOT catch:
+
+1. **Manifest lied about disk state.** The manifest listed 18
+   screenshot paths but the corresponding files had been deleted
+   from disk (rm -rf mistake, between v1.1.0 audit and this run).
+   v1.1.0 only validated manifest *content* (schema_version,
+   dev_server.reachable, totals.screenshots > 0) — never checked
+   the actual asset inventory against `docs/user-manual/screenshots/`.
+2. **The manual.md was actually HTML.** A copy/paste or rename
+   misstep replaced `manual/user-manual.md` with the viewer's
+   HTML template (4722 lines, 116KB). v1.1.0 hard gate passed
+   (manifest existed; the gate doesn't read the .md content).
+   v1.1.0's other regex-based checks happily matched `<h1>` as
+   if it were markdown. The "manual" was invalid but every check
+   said OK.
+
+This release adds two post-gate checks that are cheap to run and
+catch both failure modes at first sight.
+
+### What changed
+
+- `scripts/validate-output.py`:
+  - New `_check_manifest_disk_consistency(md_path, text)`: reads
+    `recording_manifest.json`, walks `assets.screenshots` /
+    `videos` / `ai_annotated`, and verifies every path exists on
+    disk. FAIL on `manifest_only` (manifest lies). WARN on
+    `disk_only` (orphans — not a hard fail, but reported).
+  - New `_check_file_type_sanity(md_path, text)`: cheap heuristic
+    on the first 200 / 50 lines. Rejects HTML / XML / JSON /
+    PDF / binary content masquerading as .md; also requires
+    either YAML frontmatter or a top-level H1.
+  - 21st and 22nd checks wired into `validate_file()`.
+  - Docstring bump.
+- `scripts/tests/test_validate_output.py`:
+  - New `ManifestDiskConsistencyTests` (4 cases): manifest_only
+    blocks, disk_only is warn-not-fail, consistent manifest
+    passes, no-manifest is no-op (pre-flight gate owns that
+    case).
+  - New `FileTypeSanityTests` (4 cases): HTML blocks, valid
+    markdown passes, no frontmatter-or-H1 blocks, XML blocks.
+  - `test_json_mode` updated to expect 21 checks (was 19).
+- `SKILL.md`:
+  - §16.13 new: explains both checks, the ehr 2026-06 failure
+    mode they each close, and the design trade-off (cheap
+    defensive check vs. deeper content review that validator
+    can't do).
+- Suite: 169 → 177 tests, all green.
+
+### What this does NOT catch (open for v1.3.x)
+
+- LLM-generated "fake" Chinese that sounds right but describes
+  the wrong UI affordance.
+- Hallucinated permission matrices, fake error codes, wrong
+  field types. v2.2.0 unfilled_template_terms catches the
+  *obvious* template leftovers, but a sophisticated LLM can
+  write prose that *looks* template-filled but is wrong.
+- Markdown structure that follows the §3 / §4 contract but
+  the prose is nonsense. §2.7.1 audience_leak catches
+  developer-leak patterns; not the inverse (over-eager LLM
+  writing plausible business text that isn't true).
+
+These need human review on a sample basis. The skill is not
+going to grow full coverage of "the LLM wrote something
+wrong" — that is fundamentally a generation-quality problem,
+not a contract problem.
+
 ## 1.1.0 (2026-06-27) — hard gate: recording phase must produce recording_manifest.json
 
 A user audited the ehr-generated manual (`/Users/zhangdanyang/ehr/docs/user-manual/`)
