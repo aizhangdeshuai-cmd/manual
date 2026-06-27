@@ -1052,6 +1052,8 @@ functions. The browser-level work lives in the recorder skill.
 | `python3 -m recorder_plugin.cli concat-narration <seg1> <seg2> [...] --out PATH [--gap S]` | 多段旁白 mp3 拼接,段间插入静音(默认 2.0s)。 |
 | `python3 -m recorder_plugin.cli mux-audio <video> <audio> --out PATH` | 旁白音轨合并到录屏视频(自动处理时长差,产物 = 旁白长度)。 |
 
+**v1.1.0 hard gate (machine-readable contract)**: §14 走完后,recording phase 必须额外落一份 `docs/user-manual/recording_manifest.json`(由 `python3 -m manual_helper write-recording-manifest` 生成,见 §16.11)。`validate-output.py` 在跑其他 check 之前先做 pre-flight `_check_recording_phase_actually_ran`(见 §16.12)—— 缺 manifest / dev server 不可达 / recorder exit ≠ 0 / 0 张截图 任一情况,validate-output 直接 exit 2 + 暂停 banner,**不**依赖 LLM agent 自觉跑完 §14。这一步不解决"§14 写进 prompt 但 LLM 跳过"的问题——是机器兜底。
+
 **Removed in v2.0.0** (use the recorder CLI / Python API above instead):
 `record-manual`, `record-and-replace`, `check-recorder-script` — these were
 internal subcommands that pre-dated the recorder skill split. The recorder
@@ -1301,3 +1303,96 @@ v1.0.2 起的 inliner 三层:
 - ❌ 模板变量:`<your-image-path>` / `<TODO: 截图>`
 
 **与 §14 recording phase 的协同**:草稿评审场景可以临时把分册标 `status: draft-for-review`,但**不能用 placeholder URL 蒙混** — 第 16 项确保你即使在评审阶段也至少知道"这图是占位"。删掉占位引用 / 跑录屏补真图,二选一。
+
+### 16.11 recording phase 必须落 `recording_manifest.json` (v1.1.0)
+
+§14 的"recording phase 真跑了"在 v1.0.0 是写在 docstring 里的软约束,LLM agent 跳过去不会有机器可读的后果。v1.1.0 改成**硬合同**:recorder skill CLI 跑完,**必须**调 `python3 -m manual_helper write-recording-manifest <md-path> --dev-url URL ...` 落一份 `docs/user-manual/recording_manifest.json`,记录:
+
+```json
+{
+  "schema_version": "1.0",
+  "ran_at": "<ISO-8601 UTC>",
+  "manual": "manual/<persona>.md",
+  "recorder_session_id": "<recorder CLI stdout>",
+  "recorder_cli_exit": 0,
+  "dev_server": {
+    "url": "<recorder drove against this URL>",
+    "reachable": true,
+    "readiness_status": "green",
+    "probe_host": "<hostname>"
+  },
+  "assets": {
+    "screenshots": ["screenshots/<domain>/01-list.png", ...],
+    "videos":     ["screenshots/<domain>/demo.mp4",   ...],
+    "ai_annotated": ["screenshots/<domain>/01-list.ai-annotated.png", ...]
+  },
+  "totals": {"screenshots": <int>, "videos": <int>, "ai_annotated": <int>}
+}
+```
+
+LLM agent 的 §14 收尾流程相应扩展为 6 步(原 4 步 + 5/6):
+
+1. `python3 -m manual_helper check-recording-readiness` — 拿到 readiness status
+2. `python3 -m manual_helper scan-recording-placeholders <md>` — 占位清单
+3. `python3 -m manual_helper build-recorder-template ...` — 拿到 script.json(填 selector)
+4. `python3 -m recorder_plugin.cli run <script>.json` — 跑录屏
+5. `python3 -m manual_helper apply-recording-mapping <md> <mapping.json>` — 替换占位
+6. **`python3 -m manual_helper write-recording-manifest <md> --dev-url URL --recorder-exit 0 --screenshot <path>...`** — 落硬合同
+7. `python3 -m manual_helper validate-output <md>` — 才进校验
+
+跳过第 6 步 = 校验在 §16.12 闸 1 暂停。
+
+**为什么要有 manifest 而不是看 `[SCREENSHOT:]` 占位符还在不在 md 里**:`apply_recording_mapping` 一跑占位符就消失了,标志物归零。manifest 是**产物侧的证据**:不光说"占位换掉了",还说"换上去的是 recorder 在 dev server reachable 时生成的"。这两件事不一样 —— LLM 完全可能先 apply_recording_mapping、然后手画 80×60 灰 PNG 假装录屏跑过。manifest 把"recorder CLI exit code + dev server readiness + 实际产物清单"绑成一份证据文件,validator 一次读完。
+
+### 16.12 validator 硬闸:缺 manifest 直接 exit 2 (v1.1.0)
+
+`validate-output.py` 在跑任何常规 check 之前,先做 pre-flight `_check_recording_phase_actually_ran(md_path)`:
+
+- 在 `docs/user-manual/recording_manifest.json` 里找 manifest
+- 验 `schema_version == "1.0"`
+- 验 `recorder_cli_exit == 0`
+- 验 `totals.screenshots > 0`
+- 验 `dev_server.reachable == true`(等价 `readiness_status == "green"`)
+
+任一不满足 → **不跑其他 check**,`validate-output` 打印暂停 banner 并 `exit 2`,即使没 `--strict`。
+
+banner 内容(多行,故意的 —— 要让 LLM agent / 人类 reviewer 真的停下来):
+
+```
+⛔  HARD GATE FAILED: recording phase did not actually run
+────────────────────────────────────────────────────────────
+  file: <md-path>
+  reason: <no_manifest|schema_mismatch|recorder_failed|no_screenshots|dev_server_unreachable|manifest_unreadable>
+  manifest: <path> | (none)
+  detail: <人类可读解释>
+
+  What the LLM agent should have done (in order):
+    1. python3 -m manual_helper check-recording-readiness
+    2. python3 -m manual_helper scan-recording-placeholders <md>
+    3. python3 -m manual_helper build-recorder-template ...  -> emits script.json
+    4. (you fill in selectors) -> python3 -m recorder_plugin.cli run <script>.json
+    5. python3 -m manual_helper apply-recording-mapping ...
+    6. python3 -m manual_helper write-recording-manifest ...  -> emits the gate file
+    7. python3 -m manual_helper validate-output ...  -> this script
+
+  Stopping here. The manual's markdown is still on disk, but it
+  is not a valid deliverable until §14 is run end-to-end.
+
+  If a previous run wrote hand-drawn placeholder PNGs to
+  screenshots/ (e.g. 80x60 grey stubs) to pass the file-existence
+  check, delete them so a real §14 run can write real ones
+  without hash collisions:  rm -rf docs/user-manual/screenshots/*
+
+  (Escape hatch: pass --no-hard-gate to skip this gate. CI should
+   never pass that flag.)
+────────────────────────────────────────────────────────────
+```
+
+**escape hatch**:`--no-hard-gate` 跳过 pre-flight。仅供单元测试 / CI 维护期使用,CI 配置里**永远不要**加这个 flag。Skill 测试套件有 `RecordingPhaseActuallyRanTests` 锁住:这个 flag 只 bypass 闸 1,不 bypass §16.10 placeholder_url / §16.9 broken_anchors / placeholder_alt 等其他 check。
+
+**为什么 §16.10 / §16.9 不够**:
+- §16.10 placeholder_url 只能抓"远程 URL 还在 md 里",抓不到"手画 80×60 本地 PNG 假装录屏"(ehr 2026-06 真实场景)
+- §16.9 broken_anchors 跟录屏无关
+- "screenshot files exist"(v0.3.1 引入)只看文件是否在磁盘 + 尺寸 ≥ 50×50,80×60 灰图正好过
+
+manifest 闸 = "录屏真跑" 的唯一可信信号,因为它把 dev server 联通状态、recorder CLI 退出码、产物清单绑一份带 timestamp 的机器可读合同。

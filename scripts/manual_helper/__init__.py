@@ -116,6 +116,9 @@ from .recording import (
     _step_template_lines,
     _normalize_mapping_value,
     apply_recording_mapping,
+    write_recording_manifest,
+    auto_promote_annotated_paths,
+    _resolve_annotated_sibling,
 )
 
 # db
@@ -169,6 +172,8 @@ __all__ = [
     "_infer_viewport",
     "_extract_step_captions", "_step_template_lines",
     "_normalize_mapping_value", "apply_recording_mapping",
+    "auto_promote_annotated_paths", "_resolve_annotated_sibling",
+    "write_recording_manifest",
     # db
     "find_config", "load_config", "api_base_from_config", "read_md_split",
     "http_post_json", "http_post_multipart",

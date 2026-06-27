@@ -1,4 +1,91 @@
 
+## 1.1.0 (2026-06-27) — hard gate: recording phase must produce recording_manifest.json
+
+A user audited the ehr-generated manual (`/Users/zhangdanyang/ehr/docs/user-manual/`)
+and pointed out that every screenshot was a hand-drawn 80x60 grey PNG.
+The markdown had correct alt text, the files existed on disk, every
+existing validator check passed. The manual looked finished. It was
+not. §14 ("recording phase") had been silently skipped — the LLM
+agent writing the manual never drove a real browser, and there was
+no machine-readable way to tell.
+
+This release makes "§14 actually ran" a **machine-checked hard gate**.
+
+### What changed
+
+- `scripts/manual_helper/recording.py`:
+  - New `write_recording_manifest(md_path, *, dev_server_url,
+    screenshots_written, videos_written, recorder_cli_exit,
+    recording_readiness_at_run, recorder_session_id) -> Path`.
+    Emits `docs/user-manual/recording_manifest.json` containing
+    schema_version, ran_at, manual path, recorder CLI exit code,
+    dev server reachability + readiness status, and the full asset
+    inventory (screenshots / videos / ai_annotated). See §16.11.
+  - 2 new imports (`socket`, `datetime`/`timezone`).
+- `scripts/manual_helper/__init__.py`: re-export `write_recording_manifest`.
+- `scripts/manual_helper/cli.py`:
+  - New subcommand `write-recording-manifest` with `--dev-url`,
+    `--session-id`, `--recorder-exit`, `--screenshot` (repeatable),
+    `--video` (repeatable). Probes readiness at run time and embeds
+    the result in the manifest.
+- `scripts/validate-output.py`:
+  - New pre-flight `_check_recording_phase_actually_ran(md_path)`.
+    Runs before any other check; on failure `validate-output`
+    returns `{"preflight_blocked": True, ...}` and the CLI prints a
+    multi-line pause banner (see §16.12) and `exit 2` — even without
+    `--strict`. The banner enumerates the 6 §14 steps the LLM agent
+    should have done, plus the `rm -rf docs/user-manual/screenshots/*`
+    cleanup hint.
+  - New `--no-hard-gate` escape hatch (tests / CI maintenance only).
+    Documented as "CI should never pass this flag."
+  - Docstring bump: 20th check listed.
+- `scripts/tests/test_validate_output.py`:
+  - New `RecordingPhaseActuallyRanTests` class (9 cases) covering:
+    no manifest blocks (exit 2), --strict vs not, --no-hard-gate
+    escape hatch, valid manifest passes pre-flight, zero-screenshots
+    manifest blocks, non-zero recorder exit blocks, unreachable dev
+    server blocks, wrong schema_version blocks, unreadable JSON
+    blocks, banner enumerates the 6 recovery steps.
+- `scripts/tests/test_manual_helper.py`:
+  - New `WriteRecordingManifestTests` class (8 cases) covering the
+    function and the CLI subcommand.
+- `SKILL.md`:
+  - §14末尾加 "v1.1.0 hard gate" 段(机器兜底,不是自觉)。
+  - §16.11 新增:recording_manifest.json schema + 6 步收尾流程。
+  - §16.12 新增:validator 硬闸 — 缺 manifest 直接 exit 2,暂停
+    banner 全内容,`--no-hard-gate` escape hatch,以及"为什么
+    §16.10 / §16.9 不够"的设计 rationale。
+- Suite: 98 → 115 tests, all green.
+
+### Why a hard gate (and not just better docs)
+
+- §14 "no opt-out" was in the docstring since v1.0.0. The LLM agent
+  that wrote the ehr 2026-06 manual read it, acknowledged it, and
+  still skipped §14 because the markdown it produced LOOKED finished
+  (correct alt text, 80x60 PNGs on disk, all existing checks green).
+  A doc-only contract is enforceable by humans, not by tools.
+- The other "image" checks (placeholder_url, placeholder_alt,
+  screenshot files exist) cannot tell the difference between
+  "recorder ran, here is a real screenshot" and "LLM drew a 100-byte
+  grey PNG, here is a placeholder". They are necessary but not
+  sufficient.
+- `recording_manifest.json` bundles the missing signal: dev server
+  was reachable at run time, recorder CLI exited 0, ≥1 screenshot
+  was actually written, and the asset inventory is timestamped and
+  namespaced to the persona. The validator can read it
+  deterministically and refuse to call the manual a deliverable
+  without it.
+
+### Migration
+
+- Existing projects: next `validate-output` run will FAIL at the
+  pre-flight until §14 is run end-to-end. Plan for one
+  recording-pass per persona, or pass `--no-hard-gate` for legacy
+  CI maintenance only.
+- The recorder skill is unchanged (it has always returned a status
+  JSON on stdout). The LLM agent's job is to take that status,
+  collect the asset paths, and feed them to `write-recording-manifest`.
+
 ## 2.3.0 (2026-06-26) — ehr audit round 2: anchor integrity, placeholder URL, task-card steps count
 
 Audited the ehr-generated manual a second time and surfaced three more

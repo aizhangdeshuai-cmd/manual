@@ -58,6 +58,9 @@ cmd_init_db = _db.cmd_init_db
 cmd_upsert_manual = _db.cmd_upsert_manual
 cmd_upload_asset = _db.cmd_upload_asset
 prune_silent_backups = _recording.prune_silent_backups
+auto_promote_annotated_paths = _recording.auto_promote_annotated_paths
+_resolve_annotated_sibling = _recording._resolve_annotated_sibling
+write_recording_manifest = _recording.write_recording_manifest
 
 
 def main(argv: list[str]) -> int:
@@ -335,6 +338,149 @@ def main(argv: list[str]) -> int:
         md_paths = [Path(p) for p in argv[4:]]
         result = build_standalone(tmpl, out, md_paths)
         print(f"wrote: {result}")
+        return 0
+
+    if cmd == "auto-promote-annotated":
+        # v1.1.0: walk one or more .md files and switch every
+        # `![alt](path.png)` reference to its `.annotated.png` sibling
+        # if that sibling exists on disk. Used by the post-recording
+        # pass and by the new `screenshot_uses_annotated` validator
+        # check to fix manuals whose alt text describes a red box but
+        # whose image is the bare unannotated PNG.
+        #
+        # Usage: manual_helper.py auto-promote-annotated <md-path> [more...]
+        # Prints a one-line summary per file and a final tally.
+        # Use --dry-run to print without writing.
+        if len(argv) < 3:
+            print(
+                "usage: manual_helper.py auto-promote-annotated [--dry-run] <md-path> [more...]",
+                file=sys.stderr,
+            )
+            return 2
+        dry_run = "--dry-run" in argv
+        paths = [Path(a) for a in argv[2:] if not a.startswith("--")]
+        if not paths:
+            print("error: no <md-path> provided", file=sys.stderr)
+            return 2
+        total_promoted = 0
+        for md_path in paths:
+            if not md_path.exists():
+                print(f"warn: {md_path} does not exist, skipping", file=sys.stderr)
+                continue
+            md_text = md_path.read_text(encoding="utf-8")
+            new_text, n, promoted = auto_promote_annotated_paths(
+                md_text, md_dir=md_path.parent, prefer_annotated=True,
+            )
+            action = "would promote" if dry_run else "promoted"
+            if n == 0:
+                print(f"{md_path}: 0 references needed {action}")
+            else:
+                print(f"{md_path}: {action} {n} reference(s)")
+                for p_old in promoted[:10]:
+                    print(f"  - {p_old}")
+                if len(promoted) > 10:
+                    print(f"  ... and {len(promoted) - 10} more")
+            if not dry_run and n > 0:
+                md_path.write_text(new_text, encoding="utf-8")
+            total_promoted += n
+        print(f"TOTAL: {total_promoted} reference(s) {'would be ' if dry_run else ''}promoted across {len(paths)} file(s)")
+        return 0
+
+    if cmd == "write-recording-manifest":
+        # v1.1.0 (hard gate): write docs/user-manual/recording_manifest.json
+        # so validate-output.py can verify the recording phase actually ran.
+        # The recorder skill CLI's stdout is the source of truth for
+        # `screenshots_written` / `videos_written`; the LLM agent loops
+        # over them and passes the paths here. The manifest is what the
+        # v1.1.0 validator hard-gate reads. Without this file the manual
+        # is treated as a draft and validate-output exits 2.
+        #
+        # Usage: manual_helper.py write-recording-manifest <md-path>
+        #        --dev-url URL [--session-id SID] [--recorder-exit N]
+        #        [--screenshot <path>]... [--video <path>]...
+        # Examples:
+        #   manual_helper.py write-recording-manifest \
+        #       docs/user-manual/manual/sys.md \
+        #       --dev-url http://localhost:8080 \
+        #       --session-id 2026-06-27T12:00:00Z \
+        #       --recorder-exit 0 \
+        #       --screenshot screenshots/sys/01-list.png \
+        #       --video screenshots/sys/demo.mp4
+        if len(argv) < 3:
+            print(
+                "usage: manual_helper.py write-recording-manifest <md-path> "
+                "--dev-url URL [--session-id SID] [--recorder-exit N] "
+                "[--screenshot PATH]... [--video PATH]...",
+                file=sys.stderr,
+            )
+            return 2
+        md_path = Path(argv[2])
+        dev_url = ""
+        session_id = ""
+        recorder_exit = 0
+        shots: list[Path] = []
+        vids: list[Path] = []
+        i = 3
+        while i < len(argv):
+            a = argv[i]
+            if a == "--dev-url" and i + 1 < len(argv):
+                dev_url = argv[i + 1]
+                i += 2
+                continue
+            if a == "--session-id" and i + 1 < len(argv):
+                session_id = argv[i + 1]
+                i += 2
+                continue
+            if a == "--recorder-exit" and i + 1 < len(argv):
+                try:
+                    recorder_exit = int(argv[i + 1])
+                except ValueError:
+                    print(f"error: --recorder-exit value {argv[i + 1]!r} is not an int", file=sys.stderr)
+                    return 2
+                i += 2
+                continue
+            if a == "--screenshot" and i + 1 < len(argv):
+                shots.append(Path(argv[i + 1]))
+                i += 2
+                continue
+            if a == "--video" and i + 1 < len(argv):
+                vids.append(Path(argv[i + 1]))
+                i += 2
+                continue
+            if a.startswith("--"):
+                print(f"warn: unknown flag {a!r} ignored", file=sys.stderr)
+                i += 1
+                continue
+            i += 1
+        if not md_path.exists():
+            print(f"error: {md_path} does not exist", file=sys.stderr)
+            return 2
+        if not dev_url:
+            print("error: --dev-url is required", file=sys.stderr)
+            return 2
+        # Probe readiness at this moment; the manifest records it so the
+        # validator can tell "recorder ran while dev server was reachable"
+        # from "recorder ran against a dead dev server (worthless assets)".
+        try:
+            md_for_readiness = md_path.resolve().parent.parent.parent  # docs/user-manual/manual/x.md -> <proj>
+            readiness = check_recording_readiness(md_for_readiness)
+        except Exception as e:  # noqa: BLE001 - any error is informational
+            readiness = {"status": "n/a", "summary": f"probe failed: {type(e).__name__}: {e}"}
+        out = write_recording_manifest(
+            md_path,
+            dev_server_url=dev_url,
+            screenshots_written=shots,
+            videos_written=vids,
+            recorder_cli_exit=recorder_exit,
+            recording_readiness_at_run=readiness,
+            recorder_session_id=session_id,
+        )
+        # Read it back and print a one-line summary.
+        from .common import now_et
+        print(f"wrote: {out}")
+        print(f"  dev_url: {dev_url}")
+        print(f"  recorder_exit: {recorder_exit}  readiness: {readiness.get('status', 'n/a')}")
+        print(f"  screenshots: {len(shots)}  videos: {len(vids)}  ({now_et()})")
         return 0
 
     if cmd == "read-config":

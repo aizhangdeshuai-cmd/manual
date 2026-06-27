@@ -12,6 +12,34 @@ PYTHON = os.environ.get("PYTHON", "python3")
 
 
 def run(args, stdin=None):
+    # v1.1.0: hard gate is on by default. Old unit tests (98 of 115)
+    # were written before the gate existed and don't seed a manifest;
+    # auto-inject --no-hard-gate so they keep testing what they
+    # actually test (the per-check logic) and not the pre-flight.
+    # New RecordingPhaseActuallyRanTests pass `_raw=True` to opt out
+    # of the auto-injection so they can exercise the gate itself.
+    inject = True
+    if isinstance(args, list) and len(args) > 0 and args[0] == "_raw":
+        args = args[1:]
+        inject = False
+    elif isinstance(args, list):
+        for a in args:
+            if isinstance(a, str) and (a == "--no-hard-gate" or a.startswith("--no-hard-gate=")):
+                inject = False
+                break
+    if inject:
+        if "--no-hard-gate" not in args:
+            args = ["--no-hard-gate", *args]
+    return subprocess.run(
+        [PYTHON, str(SCRIPT), *args],
+        capture_output=True, text=True, input=stdin,
+    )
+
+
+def run_raw(args, stdin=None):
+    """v1.1.0: bypass the auto --no-hard-gate injection in run().
+    Used by RecordingPhaseActuallyRanTests to exercise the hard
+    gate itself."""
     return subprocess.run(
         [PYTHON, str(SCRIPT), *args],
         capture_output=True, text=True, input=stdin,
@@ -1430,3 +1458,194 @@ class TaskCardStepsCountTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+# v1.1.0: hard gate. Validate that without a recording_manifest.json the
+# validator exits 2 with a pause banner; with a valid manifest the
+# pre-flight passes and the other checks run normally. With --no-hard-gate
+# the gate is bypassed.
+class RecordingPhaseActuallyRanTests(unittest.TestCase):
+    """v1.1.0: SKILL.md §14 hard gate. The LLM agent must produce
+    docs/user-manual/recording_manifest.json (via the recorder skill
+    CLI) or the manual is not a valid deliverable. These tests pin
+    that contract.
+    """
+
+    def _make_manual_dir(self, tmp: Path, *, with_manifest: bool,
+                         manifest: dict | None = None,
+                         md_body: str | None = None) -> Path:
+        """Create docs/user-manual/manual/<name>.md (+ optional manifest)."""
+        manual_dir = tmp / "docs" / "user-manual" / "manual"
+        manual_dir.mkdir(parents=True, exist_ok=True)
+        if md_body is None:
+            md_body = (
+                "---\n"
+                "title: T\n"
+                "module: m\n"
+                "description: test description for search excerpt\n"
+                "---\n"
+                "\n# T\n\n## 适用角色\n- x\n"
+            )
+        (manual_dir / "t.md").write_text(md_body, encoding="utf-8")
+        if with_manifest:
+            (tmp / "docs" / "user-manual" / "recording_manifest.json").write_text(
+                json.dumps(manifest or {
+                    "schema_version": "1.0",
+                    "ran_at": "2026-06-27T00:00:00+00:00",
+                    "manual": "manual/t.md",
+                    "recorder_session_id": "sess-test",
+                    "recorder_cli_exit": 0,
+                    "dev_server": {
+                        "url": "http://localhost:8080",
+                        "reachable": True,
+                        "readiness_status": "green",
+                        "probe_host": "test-host",
+                    },
+                    "assets": {
+                        "screenshots": ["screenshots/t/01.png"],
+                        "videos": [],
+                        "ai_annotated": [],
+                    },
+                    "totals": {"screenshots": 1, "videos": 0, "ai_annotated": 0},
+                }, indent=2),
+                encoding="utf-8",
+            )
+        return manual_dir / "t.md"
+
+    def test_no_manifest_blocks_validate(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            md = self._make_manual_dir(tmp, with_manifest=False)
+            r = run_raw([str(md)])
+            self.assertEqual(r.returncode, 2, msg=f"expected exit 2, got {r.returncode}\nstderr: {r.stderr}")
+            self.assertIn("HARD GATE FAILED", r.stderr)
+            self.assertIn("recording phase did not actually run", r.stderr)
+            self.assertIn("recording_manifest.json", r.stderr)
+
+    def test_no_manifest_blocks_even_without_strict(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            md = self._make_manual_dir(tmp, with_manifest=False)
+            # No --strict, but the hard gate still fires (it ignores --strict).
+            r = run_raw([str(md)])
+            self.assertEqual(r.returncode, 2)
+
+    def test_no_hard_gate_escape_hatch(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            md = self._make_manual_dir(tmp, with_manifest=False)
+            r = run_raw(["--no-hard-gate", str(md)])
+            # Without --strict, validate-output exits 0 even with FAILs
+            # from the other checks. We only care that the pre-flight
+            # banner did NOT print.
+            self.assertNotIn("HARD GATE FAILED", r.stderr)
+            self.assertNotEqual(r.returncode, 2)
+
+    def test_valid_manifest_passes_preflight(self):
+        # v1.1.0 fix: a valid manifest means the pre-flight gate passes
+        # (no exit 2, no HARD GATE FAILED banner). Other per-check
+        # results are irrelevant to this test — the placeholder md is
+        # deliberately minimal so other checks may fail.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            md = self._make_manual_dir(tmp, with_manifest=True)
+            r = run_raw(["--json", str(md)])
+            self.assertNotEqual(r.returncode, 2, msg=f"pre-flight should pass; got exit {r.returncode}; stderr: {r.stderr}")
+            self.assertNotIn("HARD GATE FAILED", r.stderr)
+            data = json.loads(r.stdout)
+            self.assertFalse(data[0].get("preflight_blocked", False))
+            gate_check = next(
+                (c for c in data[0]["checks"] if c["name"].startswith("recording_phase_actually_ran")),
+                None,
+            )
+            self.assertIsNotNone(gate_check, msg=f"gate check missing in: {data[0]['checks']}")
+            self.assertTrue(gate_check["ok"])
+
+    def test_manifest_with_zero_screenshots_blocks(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            bad = {
+                "schema_version": "1.0",
+                "recorder_session_id": "sess-empty",
+                "recorder_cli_exit": 0,
+                "dev_server": {"url": "http://x", "reachable": True,
+                               "readiness_status": "green", "probe_host": "h"},
+                "assets": {"screenshots": [], "videos": [], "ai_annotated": []},
+                "totals": {"screenshots": 0, "videos": 0, "ai_annotated": 0},
+            }
+            md = self._make_manual_dir(tmp, with_manifest=True, manifest=bad)
+            r = run_raw([str(md)])
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("no_screenshots", r.stderr)
+
+    def test_manifest_with_recorder_nonzero_exit_blocks(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            bad = {
+                "schema_version": "1.0",
+                "recorder_session_id": "sess-fail",
+                "recorder_cli_exit": 1,
+                "dev_server": {"url": "http://x", "reachable": True,
+                               "readiness_status": "green", "probe_host": "h"},
+                "assets": {"screenshots": ["a.png"], "videos": [], "ai_annotated": []},
+                "totals": {"screenshots": 1, "videos": 0, "ai_annotated": 0},
+            }
+            md = self._make_manual_dir(tmp, with_manifest=True, manifest=bad)
+            r = run_raw([str(md)])
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("recorder_failed", r.stderr)
+
+    def test_manifest_with_unreachable_dev_server_blocks(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            bad = {
+                "schema_version": "1.0",
+                "recorder_session_id": "sess-dead",
+                "recorder_cli_exit": 0,
+                "dev_server": {"url": "http://x", "reachable": False,
+                               "readiness_status": "red", "probe_host": "h"},
+                "assets": {"screenshots": ["a.png"], "videos": [], "ai_annotated": []},
+                "totals": {"screenshots": 1, "videos": 0, "ai_annotated": 0},
+            }
+            md = self._make_manual_dir(tmp, with_manifest=True, manifest=bad)
+            r = run_raw([str(md)])
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("dev_server_unreachable", r.stderr)
+
+    def test_manifest_with_wrong_schema_blocks(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            bad = {"schema_version": "0.9", "recorder_cli_exit": 0}
+            md = self._make_manual_dir(tmp, with_manifest=True, manifest=bad)
+            r = run_raw([str(md)])
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("schema_mismatch", r.stderr)
+
+    def test_manifest_unreadable_json_blocks(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            md = self._make_manual_dir(tmp, with_manifest=False)
+            (tmp / "docs" / "user-manual" / "recording_manifest.json").write_text(
+                "{ this is not json", encoding="utf-8",
+            )
+            r = run_raw([str(md)])
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("manifest_unreadable", r.stderr)
+
+    def test_preflight_pause_banner_mentions_seven_steps(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            md = self._make_manual_dir(tmp, with_manifest=False)
+            r = run_raw([str(md)])
+            # The banner should enumerate the 6 steps + the
+            # validate-output re-run, so the LLM agent can recover.
+            for step in [
+                "check-recording-readiness",
+                "scan-recording-placeholders",
+                "build-recorder-template",
+                "recorder_plugin.cli run",
+                "apply-recording-mapping",
+                "write-recording-manifest",
+            ]:
+                self.assertIn(step, r.stderr, msg=f"banner missing step: {step}")

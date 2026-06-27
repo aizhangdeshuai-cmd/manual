@@ -43,6 +43,13 @@ v1.1.0 — added the 9th check: "screenshot_uses_annotated". Closes
  FAIL. Use --annotated-relaxed to downgrade to a warning.
 v0.4.0 — added the 8th check: "screenshot unique" (now default
  since v1.1.0; pre-1.1.0 was opt-in via --unique).
+v1.1.0 — added the HARD GATE pre-flight: `_check_recording_phase_actually_ran`.
+ The gate reads `docs/user-manual/recording_manifest.json` (written by the
+ recorder skill via `manual_helper write-recording-manifest`). Without that
+ file (or with a manifest that says dev server was unreachable, or recorder
+ exit != 0, or 0 screenshots), validate-output prints a pause banner and
+ exits 2 — even without --strict. Pass --no-hard-gate as an escape hatch
+ for tests / CI maintenance.
 """
 import json
 import re
@@ -891,6 +898,120 @@ def _check_audience_leak(text: str) -> dict:
     }
 
 
+# v1.1.0: hard gate. A "finished" user-manual must have a
+# recording_manifest.json next to it (sibling of docs/user-manual/manual/
+# or at docs/user-manual/recording_manifest.json) that proves the
+# recorder skill drove a real browser against a reachable dev server.
+# Without this file, the LLM agent almost certainly hand-drew 80x60
+# grey PNGs as "screenshots" and is trying to pass them off as real
+# assets. The ehr 2026-06 manual shipped exactly this failure mode:
+# alt text was perfect, files existed on disk, every prior check
+# passed. The manual looked finished. It was not. This hard gate
+# closes that gap.
+def _check_recording_phase_actually_ran(md_path: Path) -> dict:
+    """Read docs/user-manual/recording_manifest.json and verify it is
+    a real, complete manifest. Used as a pre-flight gate in
+    validate_file(); if it fails, validate_file returns early and
+    main() prints the pause banner and exits 2.
+    """
+    # Search up for docs/user-manual/ from the .md file.
+    candidates: list[Path] = []
+    cur = md_path.resolve().parent
+    while cur != cur.parent:
+        candidates.append(cur / "recording_manifest.json")
+        if cur.name == "user-manual":
+            break
+        cur = cur.parent
+    manifest = next((c for c in candidates if c.exists()), None)
+    if manifest is None:
+        return {
+            "ok": False,
+            "name": "recording_phase_actually_ran (v1.1.0 hard gate)",
+            "reason": "no_manifest",
+            "manifest_path": None,
+            "detail": (
+                "no recording_manifest.json found. The LLM agent that "
+                "wrote this manual did not run SKILL.md \u00a714 (the "
+                "recording phase) end-to-end, and the markdown was "
+                "submitted as a deliverable without real screenshots."
+            ),
+        }
+    try:
+        import json as _json
+        data = _json.loads(manifest.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        return {
+            "ok": False,
+            "name": "recording_phase_actually_ran (v1.1.0 hard gate)",
+            "reason": "manifest_unreadable",
+            "manifest_path": str(manifest),
+            "detail": f"manifest exists but is unreadable: {type(e).__name__}: {e}",
+        }
+    # Schema check
+    if data.get("schema_version") != "1.0":
+        return {
+            "ok": False,
+            "name": "recording_phase_actually_ran (v1.1.0 hard gate)",
+            "reason": "schema_mismatch",
+            "manifest_path": str(manifest),
+            "detail": (
+                f"manifest schema_version is {data.get('schema_version')!r}, "
+                "expected '1.0'. Re-run the recorder (it writes the current "
+                "schema)."
+            ),
+        }
+    if int(data.get("recorder_cli_exit", 1)) != 0:
+        return {
+            "ok": False,
+            "name": "recording_phase_actually_ran (v1.1.0 hard gate)",
+            "reason": "recorder_failed",
+            "manifest_path": str(manifest),
+            "detail": (
+                f"recorder_cli_exit={data.get('recorder_cli_exit')!r}, expected 0. "
+                "Re-run the recorder and verify it exits 0."
+            ),
+        }
+    totals = data.get("totals", {}) or {}
+    shots = int(totals.get("screenshots", 0))
+    if shots <= 0:
+        return {
+            "ok": False,
+            "name": "recording_phase_actually_ran (v1.1.0 hard gate)",
+            "reason": "no_screenshots",
+            "manifest_path": str(manifest),
+            "detail": (
+                "manifest.totals.screenshots == 0. The recorder ran but wrote "
+                "no PNGs. Either the recorder script had no screenshot steps, "
+                "or every step failed silently. Re-run with verbose output."
+            ),
+        }
+    if not data.get("dev_server", {}).get("reachable", False):
+        return {
+            "ok": False,
+            "name": "recording_phase_actually_ran (v1.1.0 hard gate)",
+            "reason": "dev_server_unreachable",
+            "manifest_path": str(manifest),
+            "detail": (
+                f"manifest.dev_server.readiness_status="
+                f"{data.get('dev_server', {}).get('readiness_status')!r}; "
+                "expected 'green'. The recorder ran against an unreachable dev "
+                "server and the screenshots are likely of an error page. Start "
+                "the dev server and re-run \u00a714."
+            ),
+        }
+    return {
+        "ok": True,
+        "name": "recording_phase_actually_ran (v1.1.0 hard gate)",
+        "reason": "ok",
+        "manifest_path": str(manifest),
+        "detail": (
+            f"manifest verified: {shots} screenshots, "
+            f"{totals.get('videos', 0)} videos, dev server "
+            f"{data.get('dev_server', {}).get('readiness_status', 'n/a')}"
+        ),
+    }
+
+
 def _is_placeholder_png(path: Path) -> bool:
     """v0.3.2: a PNG file is a 'placeholder' if its dimensions are < 50x50.
     Real screenshots are 1280x800+; 1×1 or 32×32 etc. means the LLM
@@ -1165,10 +1286,52 @@ CHECKS = [
 
 
 def validate_file(path):
+    # v1.1.0 hard gate: pre-flight. Runs BEFORE any other check.
+    # On failure: return a stub with preflight_blocked=True so
+    # main() prints the pause banner and exits 2 without running
+    # the (more expensive) regex checks.
+    # On success: stash the gate check on a closure var so we
+    # can prepend it to results below (so users see the gate
+    # passed, not just "the other 11 checks ran").
+    preflight_gate_check = None
+    if not globals().get("HARD_GATE_DISABLED", False):
+        gate = _check_recording_phase_actually_ran(path)
+        if not gate["ok"]:
+            return {
+                "file": str(path),
+                "ok": False,
+                "checks": [{
+                    "name": gate["name"],
+                    "hits": 0,
+                    "threshold": 1,
+                    "comparison": "ge",
+                    "ok": False,
+                    "reason": gate["reason"],
+                    "manifest_path": gate["manifest_path"],
+                    "detail": gate["detail"],
+                }],
+                "preflight_blocked": True,
+                "preflight_reason": gate["reason"],
+            }
+        preflight_gate_check = {
+            "name": gate["name"],
+            "hits": 1,
+            "threshold": 1,
+            "comparison": "ge",
+            "ok": True,
+            "reason": gate["reason"],
+            "manifest_path": gate["manifest_path"],
+            "detail": gate["detail"],
+        }
     text = path.read_text(encoding="utf-8", errors="replace")
     text_for_prose = _strip_code(text)
     results = []
-    all_ok = True
+    if preflight_gate_check is not None:
+        results.append(preflight_gate_check)
+    # v1.1.0: if pre-flight was disabled, start True; if it ran and
+    # passed, start True; only start False if it ran and blocked (which
+    # would have returned early above, so this is just defensive).
+    all_ok = preflight_gate_check is None or preflight_gate_check.get("ok", False)
     for name, pattern, threshold, cmp, exclude_code in CHECKS:
         target = text_for_prose if exclude_code else text
         hits = len(pattern.findall(target))
@@ -1502,11 +1665,16 @@ def main(argv):
     # siblings exist (e.g. you want to show the original UI alongside
     # the annotated version in a side-by-side comparison).
     annotated_relaxed = "--annotated-relaxed" in args
+    # v1.1.0: --no-hard-gate is an escape hatch for tests / CI
+    # maintenance. It disables the recording_manifest.json pre-flight
+    # gate. DO NOT pass this when validating a deliverable.
+    hard_gate_disabled = "--no-hard-gate" in args
     args = [a for a in args if not a.startswith("--")]
     # Stash on module globals so validate_file can pick up.
     globals()["UNIQUE_CHECK_ENABLED"] = unique
     globals()["UNIQUE_CHECK_ALLOW"] = unique_allow
     globals()["ANNOTATED_RELAXED"] = annotated_relaxed
+    globals()["HARD_GATE_DISABLED"] = hard_gate_disabled
     if not args:
         print(__doc__.strip())
         return 0
@@ -1515,9 +1683,60 @@ def main(argv):
         print(json.dumps(results, ensure_ascii=False, indent=2))
     else:
         print(render_human(results))
+    # v1.1.0: pre-flight pause banner. If any file was blocked at the
+    # recording-phase gate, print a loud "stop and run \u00a714" message
+    # and exit 2 (regardless of --strict). This is the contract that
+    # forces the LLM agent to actually drive the recorder, not just
+    # hand-draw placeholders and submit.
+    blocked = [r for r in results if r.get("preflight_blocked")]
+    if blocked:
+        if not as_json:
+            _print_hard_gate_pause_banner(blocked)
+        return 2
     if strict and not all(r["ok"] for r in results):
         return 1
     return 0
+
+
+def _print_hard_gate_pause_banner(blocked: list[dict]) -> None:
+    """v1.1.0: print the "STOP, run \u00a714 end-to-end" message when the
+    pre-flight recording-phase gate fails. Multi-line, intentional: the
+    whole point is to make the LLM agent (or human reviewer) stop and
+    think before pushing the manual as a deliverable.
+    """
+    print("", file=sys.stderr)
+    print("\u26d4  HARD GATE FAILED: recording phase did not actually run", file=sys.stderr)
+    print("-" * 64, file=sys.stderr)
+    print("", file=sys.stderr)
+    for r in blocked:
+        check = r["checks"][0]
+        print(f"  file: {r['file']}", file=sys.stderr)
+        print(f"  reason: {check.get('reason', '?')}", file=sys.stderr)
+        print(f"  manifest: {check.get('manifest_path') or '(none)'}", file=sys.stderr)
+        print(f"  detail: {check.get('detail', '')}", file=sys.stderr)
+        print("", file=sys.stderr)
+    print("  What the LLM agent should have done (in order):", file=sys.stderr)
+    print("    1. python3 -m manual_helper check-recording-readiness", file=sys.stderr)
+    print("         -> expected: \u2705 GREEN or \u26a0\ufe0f  WARNING. If", file=sys.stderr)
+    print("            \ud83d\udd34 BLOCKED, fix env first.", file=sys.stderr)
+    print("    2. python3 -m manual_helper scan-recording-placeholders docs/user-manual/manual/<x>.md", file=sys.stderr)
+    print("    3. python3 -m manual_helper build-recorder-template ...  -> emits script.json", file=sys.stderr)
+    print("    4. (you fill in selectors) -> python3 -m recorder_plugin.cli run <script>.json", file=sys.stderr)
+    print("    5. python3 -m manual_helper apply-recording-mapping ...  -> replaces placeholders", file=sys.stderr)
+    print("    6. python3 -m manual_helper write-recording-manifest ...  -> emits the gate file", file=sys.stderr)
+    print("    7. python3 -m manual_helper validate-output ...  -> this script", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("  Stopping here. The manual's markdown is still on disk, but it", file=sys.stderr)
+    print("  is not a valid deliverable until \u00a714 is run end-to-end.", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("  If a previous run wrote hand-drawn placeholder PNGs to", file=sys.stderr)
+    print("  screenshots/ (e.g. 80x60 grey stubs) to pass the file-existence", file=sys.stderr)
+    print("  check, delete them so a real \u00a714 run can write real ones", file=sys.stderr)
+    print("  without hash collisions:  rm -rf docs/user-manual/screenshots/*", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("  (Escape hatch: pass --no-hard-gate to skip this gate. CI should", file=sys.stderr)
+    print("   never pass that flag.)", file=sys.stderr)
+    print("-" * 64, file=sys.stderr)
 
 
 if __name__ == "__main__":

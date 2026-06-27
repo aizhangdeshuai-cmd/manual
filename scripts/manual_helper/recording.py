@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import sys
+from datetime import datetime, timezone
 import urllib.request
 from pathlib import Path
 
@@ -407,6 +409,82 @@ def _step_template_lines(placeholders: list[dict]) -> list[dict]:
     return out
 
 
+def _resolve_annotated_sibling(path: Path) -> Path | None:
+    """If `path` is a non-annotated image, return the `.annotated.png` sibling.
+
+    v1.1.0: recorder's `screenshot` step writes both `<name>.png` (raw)
+    and `<name>.annotated.png` (with the red box / arrow / caption drawn
+    on top). The annotated version is the one that matches the user-facing
+    alt-text convention ("红框:...", "箭头:...", "看到:...").
+
+    Returns the annotated path if it exists on disk; else None.
+    """
+    if path.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+        return None
+    annotated = path.with_name(f"{path.stem}.annotated{path.suffix}")
+    if annotated.exists() and annotated.is_file():
+        return annotated
+    return None
+
+
+def auto_promote_annotated_paths(
+    text: str,
+    md_dir: Path | None = None,
+    prefer_annotated: bool = True,
+) -> tuple[str, int, list[str]]:
+    """v1.1.0: walk markdown `![alt](path.png)` references and switch
+    each one to its `.annotated.png` sibling if that sibling exists on
+    disk.
+
+    Why this exists: recorder always emits both `<name>.png` and
+    `<name>.annotated.png`. Markdown authors (or LLM agents writing
+    markdown) often reach for the bare `.png` because that's what the
+    recorder step name is. The result is manuals whose alt text says
+    "红框:..." but whose image has no red box. This function fixes that
+    silently, returning a (new_text, promoted_count, promoted_paths)
+    tuple the caller can report.
+
+    Resolution rules:
+      - Path is resolved relative to `md_dir` (the directory containing
+        the .md file). If `md_dir` is None, only absolute paths resolve.
+      - `.gif` / `.mp4` / `.webm` / `.mov` are NOT promoted (annotated
+        versions only exist for still images; video cards carry their
+        own UI cues).
+      - If the referenced path itself already ends in `.annotated.png`,
+        we skip it.
+      - If no `.annotated.png` sibling exists, we leave the reference
+        alone (the recorder might be `screenshot-only` mode).
+
+    Returns: (new_text, promoted_count, [paths that were switched]).
+    """
+    if not prefer_annotated:
+        return text, 0, []
+    promoted: list[str] = []
+    pattern = re.compile(
+        r"!\[(?P<alt>[^\]]*)\]\((?P<path>[^)\s]+\.(?:png|jpg|jpeg))(?P<trail>[^)]*)\)"
+    )
+
+    def _repl(m: re.Match) -> str:
+        original = m.group("path")
+        if Path(original).stem.endswith(".annotated"):
+            return m.group(0)
+        if md_dir is None:
+            return m.group(0)
+        target = (md_dir / original).resolve()
+        annotated = _resolve_annotated_sibling(target)
+        if annotated is None:
+            return m.group(0)
+        try:
+            new_rel = annotated.relative_to(md_dir.resolve())
+        except ValueError:
+            new_rel = Path(original)
+        promoted.append(original)
+        return f"![{m.group('alt')}]({new_rel.as_posix()}{m.group('trail')})"
+
+    new_text = pattern.sub(_repl, text)
+    return new_text, len(promoted), promoted
+
+
 def _normalize_mapping_value(v) -> tuple[str, str | None]:
     """v0.3.0 (mapping alt field): mapping values can be either a
     bare string (the path; alt defaults to the key) or a dict
@@ -422,10 +500,22 @@ def _normalize_mapping_value(v) -> tuple[str, str | None]:
     )
 
 
-def apply_recording_mapping(text: str, mapping: dict) -> tuple[str, dict, list, int]:
+def apply_recording_mapping(
+    text: str,
+    mapping: dict,
+    md_dir: Path | None = None,
+    prefer_annotated: bool = True,
+) -> tuple[str, dict, list, int]:
     """Replace placeholders in text with real asset paths from mapping.
 
     Recognizes all 3 placeholder kinds (SCREENSHOT, VIDEO, AI ANNOTATE).
+
+    v1.1.0: added `md_dir` and `prefer_annotated` parameters. When
+    `prefer_annotated=True` and `md_dir` is provided, mapping values
+    pointing at a `.png` / `.jpg` are auto-promoted to their
+    `<stem>.annotated.<ext>` sibling if that sibling exists on disk.
+    This closes the gap where LLM-generated manuals reach for bare
+    `<name>.png` while the alt text describes a red box / arrow.
 
     v0.2.4 naming convention for the mapping keys:
       - Plain name (e.g. "01-list") -> replaces [SCREENSHOT: 01-list.*]
@@ -489,6 +579,14 @@ def apply_recording_mapping(text: str, mapping: dict) -> tuple[str, dict, list, 
             })
             continue
         alt_text = alt_override if alt_override is not None else key
+        # v1.1.0: prefer annotated sibling if available
+        if prefer_annotated and md_dir is not None:
+            promoted = _resolve_annotated_sibling(Path(real_path))
+            if promoted is not None:
+                try:
+                    real_path = str(promoted.relative_to(md_dir.resolve()))
+                except ValueError:
+                    real_path = str(promoted)
         if key.startswith("ai-annotated-"):
             name = key[len("ai-annotated-"):]
             pattern = re.compile(rf"\[AI\s+ANNOTATE\s*:\s*{re.escape(name)}(?:\.[A-Za-z0-9]+)?\]")
@@ -543,6 +641,99 @@ def apply_recording_mapping(text: str, mapping: dict) -> tuple[str, dict, list, 
                 })
     return text, replaced, missing, replaced_instances
 
+# v1.1.0 (hard gate): emit a machine-readable manifest proving the
+# recording phase ran end-to-end. validator (v1.1.0) requires this file
+# next to the manual before any "deliverable" verdict; without it the
+# LLM agent almost certainly hand-drew placeholder PNGs and is trying
+# to pass them off as real recording assets.
+def write_recording_manifest(
+    md_path: Path,
+    *,
+    dev_server_url: str,
+    screenshots_written: list[Path],
+    videos_written: list[Path],
+    recorder_cli_exit: int,
+    recording_readiness_at_run=None,
+    recorder_session_id: str = "",
+) -> Path:
+    """v1.1.0: emit a manifest that proves the recording phase actually ran.
+
+    This file is the contract that validator reads. Without it,
+    validate-output exits 2 (HARD GATE) and refuses to call the
+    manual finished.
+
+    Schema (v1.0) - see SKILL.md §16.12.
+    The manifest lives at `docs/user-manual/recording_manifest.json` so
+    the validator can find it without knowing the persona filename.
+    It is OVERWRITTEN on each run; if you are recording multiple
+    personas in one session, call once at the end with the union of
+    assets.
+    """
+    # v1.1.0 (hard gate): wrote this function because the LLM agent
+    # that built the ehr 2026-06 manual shipped 6 hand-drawn 80x60
+    # grey PNGs as "screenshots" - the markdown had the right alt
+    # text, the files existed on disk, every prior check passed. The
+    # manual looked finished. It was not. Without this manifest,
+    # there is no machine-readable way to tell "recorder drove a real
+    # browser" from "LLM wrote 6 stub PNGs in a for-loop". This file
+    # closes that gap.
+    project_root_marker = md_path
+    while project_root_marker.parent != project_root_marker:
+        if project_root_marker.name == "user-manual":
+            break
+        project_root_marker = project_root_marker.parent
+    manifest_dir = (
+        project_root_marker
+        if project_root_marker.name == "user-manual"
+        else md_path.parent
+    )
+
+    def _rel(p: Path) -> str:
+        try:
+            return str(p.resolve().relative_to(manifest_dir.resolve()))
+        except ValueError:
+            return str(p)
+
+    readiness = recording_readiness_at_run or {}
+    dev_server_section = {
+        "url": dev_server_url or "",
+        "reachable": readiness.get("status") == "green",
+        "readiness_status": readiness.get("status", "n/a"),
+        "probe_host": socket.gethostname(),
+    }
+
+    ai_annotated = [a for a in screenshots_written if ".ai-annotated." in a.name]
+    raw_screenshots = [a for a in screenshots_written if ".ai-annotated." not in a.name]
+
+    try:
+        manual_rel = str(md_path.resolve().relative_to(manifest_dir.resolve()))
+    except ValueError:
+        manual_rel = str(md_path)
+
+    manifest = {
+        "schema_version": "1.0",
+        "ran_at": datetime.now(timezone.utc).isoformat(),
+        "manual": manual_rel,
+        "recorder_session_id": recorder_session_id,
+        "recorder_cli_exit": recorder_cli_exit,
+        "dev_server": dev_server_section,
+        "assets": {
+            "screenshots": [_rel(p) for p in raw_screenshots],
+            "videos": [_rel(p) for p in videos_written],
+            "ai_annotated": [_rel(p) for p in ai_annotated],
+        },
+        "totals": {
+            "screenshots": len(raw_screenshots),
+            "videos": len(videos_written),
+            "ai_annotated": len(ai_annotated),
+        },
+    }
+    out = manifest_dir / "recording_manifest.json"
+    out.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return out
 
 # v2.1.0: recorder (recorder/SKILL.md) synthesizes a narrated video and
 # keeps the PRE-narration silent copy as `<name>.silent.mp4` next to it.

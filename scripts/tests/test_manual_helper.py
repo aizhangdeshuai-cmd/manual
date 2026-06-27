@@ -519,3 +519,158 @@ class PruneSilentBackupsTests(unittest.TestCase):
             self.assertEqual(r.returncode, 0, msg=r.stderr)
             self.assertIn("dry-run", r.stderr)
             self.assertTrue((sh / "flow" / "flow.silent.mp4").exists())
+
+
+
+# v1.1.0: write_recording_manifest() - the file that the hard-gate validator
+# reads. Without this test, the gate's evidence file is not pinned.
+class WriteRecordingManifestTests(unittest.TestCase):
+    """v1.1.0: SKILL.md §16.12 — recording_manifest.json is the machine
+    contract proving §14 ran end-to-end. Tests cover the function and
+    the CLI subcommand.
+    """
+
+    def _setup(self, tmp: Path) -> tuple[Path, Path]:
+        """Returns (manual_md, manifest_path)."""
+        manual_dir = tmp / "docs" / "user-manual" / "manual"
+        manual_dir.mkdir(parents=True, exist_ok=True)
+        md = manual_dir / "t.md"
+        md.write_text(
+            "---\ntitle: T\nmodule: m\n"
+            "description: test for write_recording_manifest\n---\n\n# T\n",
+            encoding="utf-8",
+        )
+        return md, tmp / "docs" / "user-manual" / "recording_manifest.json"
+
+    def test_writes_valid_manifest_with_screenshots(self):
+        from manual_helper.recording import write_recording_manifest
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            md, manifest = self._setup(tmp)
+            shots = [tmp / "docs/user-manual/screenshots/t/01.png",
+                     tmp / "docs/user-manual/screenshots/t/02.png"]
+            for s in shots:
+                s.parent.mkdir(parents=True, exist_ok=True)
+                s.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 100)
+            out = write_recording_manifest(
+                md, dev_server_url="http://localhost:8080",
+                screenshots_written=shots, videos_written=[],
+                recorder_cli_exit=0,
+                recording_readiness_at_run={"status": "green"},
+            )
+            self.assertEqual(out, manifest)
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            self.assertEqual(data["schema_version"], "1.0")
+            self.assertEqual(data["totals"]["screenshots"], 2)
+            self.assertEqual(data["totals"]["videos"], 0)
+            self.assertTrue(data["dev_server"]["reachable"])
+            self.assertEqual(data["dev_server"]["readiness_status"], "green")
+            self.assertEqual(data["recorder_cli_exit"], 0)
+            self.assertEqual(len(data["assets"]["screenshots"]), 2)
+
+    def test_dev_server_unreachable_when_readiness_red(self):
+        from manual_helper.recording import write_recording_manifest
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            md, manifest = self._setup(tmp)
+            (tmp / "docs/user-manual/screenshots/x/01.png").parent.mkdir(parents=True, exist_ok=True)
+            shot = tmp / "docs/user-manual/screenshots/x/01.png"
+            shot.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x")
+            out = write_recording_manifest(
+                md, dev_server_url="http://localhost:8080",
+                screenshots_written=[shot], videos_written=[],
+                recorder_cli_exit=0,
+                recording_readiness_at_run={"status": "red", "summary": "BLOCKED"},
+            )
+            data = json.loads(out.read_text(encoding="utf-8"))
+            self.assertFalse(data["dev_server"]["reachable"])
+            self.assertEqual(data["dev_server"]["readiness_status"], "red")
+
+    def test_ai_annotated_screenshots_separated(self):
+        from manual_helper.recording import write_recording_manifest
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            md, manifest = self._setup(tmp)
+            base = tmp / "docs/user-manual/screenshots/x"
+            base.mkdir(parents=True, exist_ok=True)
+            raw = base / "01.png"
+            ann = base / "01.ai-annotated.png"
+            raw.write_bytes(b"raw")
+            ann.write_bytes(b"annotated")
+            out = write_recording_manifest(
+                md, dev_server_url="http://x",
+                screenshots_written=[raw, ann], videos_written=[],
+                recorder_cli_exit=0,
+                recording_readiness_at_run={"status": "green"},
+            )
+            data = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(data["totals"]["screenshots"], 1)
+            self.assertEqual(data["totals"]["ai_annotated"], 1)
+
+    def test_videos_counted_separately(self):
+        from manual_helper.recording import write_recording_manifest
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            md, manifest = self._setup(tmp)
+            (tmp / "vids").mkdir(parents=True, exist_ok=True)
+            v1 = tmp / "vids/demo.mp4"
+            v1.write_bytes(b"x")
+            out = write_recording_manifest(
+                md, dev_server_url="http://x",
+                screenshots_written=[], videos_written=[v1],
+                recorder_cli_exit=0,
+                recording_readiness_at_run={"status": "green"},
+            )
+            data = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(data["totals"]["videos"], 1)
+            self.assertEqual(data["totals"]["screenshots"], 0)
+
+    def test_manifest_overwrites_existing(self):
+        from manual_helper.recording import write_recording_manifest
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            md, manifest = self._setup(tmp)
+            manifest.write_text("OLD MANIFEST", encoding="utf-8")
+            write_recording_manifest(
+                md, dev_server_url="http://x",
+                screenshots_written=[], videos_written=[],
+                recorder_cli_exit=0,
+                recording_readiness_at_run={"status": "green"},
+            )
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            self.assertNotEqual(data, "OLD MANIFEST")
+            self.assertEqual(data["schema_version"], "1.0")
+
+    def test_cli_writes_manifest(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            md, manifest = self._setup(tmp)
+            r = run_module(
+                "write-recording-manifest", str(md),
+                "--dev-url", "http://localhost:8080",
+                "--recorder-exit", "0",
+                "--screenshot", "screenshots/t/01.png",
+            )
+            self.assertEqual(r.returncode, 0, msg=r.stderr)
+            self.assertTrue(manifest.exists(), msg=f"manifest not written: {manifest}")
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            self.assertEqual(data["totals"]["screenshots"], 1)
+            self.assertIn("wrote:", r.stdout)
+
+    def test_cli_requires_dev_url(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            md, _ = self._setup(tmp)
+            r = run_module("write-recording-manifest", str(md))
+            self.assertEqual(r.returncode, 2, msg=f"expected exit 2, got {r.returncode}: {r.stderr}")
+            self.assertIn("--dev-url is required", r.stderr)
+
+    def test_cli_requires_existing_md(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            r = run_module(
+                "write-recording-manifest", str(tmp / "missing.md"),
+                "--dev-url", "http://x",
+            )
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("does not exist", r.stderr)
