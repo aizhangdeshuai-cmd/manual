@@ -1,4 +1,72 @@
 
+## 1.3.0 (2026-06-27) — screenshot unique: invert-polarity flag, force default-on
+
+Cosmetic / internal cleanup. Behaviour is unchanged from v1.1.0
+(where `screenshot unique` was already the documented default).
+This release fixes the flag-naming so the call site reads naturally
+and so audit runs that drop `--unique` still get the check.
+
+### What changed
+
+- `scripts/validate-output.py`:
+  - Module flag `UNIQUE_CHECK_ENABLED` renamed to
+    `UNIQUE_CHECK_SKIP` (inverted polarity: True means skip).
+  - main() now sets `UNIQUE_CHECK_SKIP = not unique` from
+    `--no-unique`. Default is `False` (do not skip), so the
+    check runs unconditionally without any flag.
+  - Call site changed to `if not globals().get("UNIQUE_CHECK_SKIP",
+    False):` — reads as a positive statement of intent.
+  - Docstring bumped: 22nd check listed; v1.3.0 entry in the
+    version history.
+- `SKILL.md`:
+  - §16.14 new: documents the cleanup, references the ehr
+    2026-06 audit round 3 (4 groups of byte-identical
+    screenshots: report-list-{toolbar,status-filter}, report-
+    column-{drawer-open,list}, report-designer-{base,fields,
+    filters,scope-card,scope-states} all SHA `b750cb64f25e`,
+    report-viewer-{pager,sort} + report-viewer all SHA
+    `d15a000fff84`), and gives the recorder-script fix recipe.
+- `CHANGELOG.md`: v1.3.0 entry.
+
+### Why this is its own release (vs. an unreleased edit)
+
+The flag was already documented as default-on in v1.1.0, but
+the implementation made the default depend on main() having
+been called first. Test harnesses that imported
+`validate-output.py` as a module and called `validate_file()`
+directly would silently skip the check (UNIQUE_CHECK_ENABLED
+uninitialized → False → branch skipped). The ehr audit ran
+via the CLI subprocess so this didn't bite that audit, but
+it would have bitten any test framework that exercised
+`validate_file()` in-process.
+
+The fix inverts the polarity so the uninitialized-flag case
+behaves correctly (default = run, opt-out = skip). No
+behaviour change for CLI users; in-process callers now get
+the documented default.
+
+### What v1.3.0 does NOT do
+
+- Does not delete `--no-unique` (still a valid escape hatch
+  for legacy reasons).
+- Does not touch `screenshot_uses_annotated`'s `--annotated-
+  relaxed` opt-out. That check has legitimate "I want the
+  bare PNG AND the annotated one in a side-by-side" use cases
+  that the relaxed flag serves. The ehr audit's screenshots
+  are not offenders of this check (the alt texts do not match
+  the "红框/箭头/..." keywords for the byte-identical groups;
+  the alt texts describe distinct actions that the LLM thought
+  were happening on different screens, which is itself a
+  different bug — see `record_real.py` fix recipe in §16.14).
+- Does not add a new "same image, different alt" detector.
+  That would be v1.4.x work; for now, the byte-equality check
+  + the alt-text keyword check + manual review of
+  `report_recorder.py` are the right combination.
+
+Suite: 177 → 177 tests (no test changes needed; behavior was
+already correct under the CLI invocation path). Re-ran to
+confirm: 177/177 green.
+
 ## 1.2.0 (2026-06-27) — manifest_disk_consistency + file_type_sanity post-gate checks
 
 A second review of the ehr-generated manual surfaced two more

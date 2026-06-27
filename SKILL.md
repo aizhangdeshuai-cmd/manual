@@ -1413,3 +1413,21 @@ v1.2.0 加两个**post-gate** check 在硬闸通过后跑:
 
 **CI 友好**: 两个 check 都默认开启,无 opt-out flag。manifest 撒谎或 manual.md 是 HTML 在 SKILL §16.12 的硬闸失效时(manifest 还在但内容是 stale),这两道是最后一道防线。
 
+
+### 16.14 v1.3.0 — screenshot unique 强制默认 + 门控语义清理 (内部 cleanup)
+
+`validate-output.py` 之前用 `UNIQUE_CHECK_ENABLED` 模块级 flag 控制 `screenshot unique` check 跑不跑。语义模糊:`enabled=True` 是默认但只有 main() 跑过才设,test harness 调 validate_file() 时 flag 是未设的(默认 False),check 实际**不跑**。v1.1.0 docstring 说 "default-on" 但 code 写得绕 — main() 注入后才真跑。ehr 这轮 review 暴露的问题之一("`screenshot unique` 在主 check 列表里看不到"是误读,实际是 hidden 跑了),来源就是这层 flag 语义模糊。
+
+v1.3.0 清理:
+- flag 改名 `UNIQUE_CHECK_SKIP`,默认 False(不 skip)
+- `--no-unique` 设 `UNIQUE_CHECK_SKIP=True`,check 跳过
+- 不传 `--no-unique` 时 check 总是跑
+- call site 改成 `if not globals().get("UNIQUE_CHECK_SKIP", False):`,读起来直白
+
+**行为变更:无**。v1.1.0 起 default-on 的事实没变,只是 flag 名/语义清理让 audit 跑 `validate-output.py <file>` 不带 flag 时 check 一定跑,ehr 报告里 4 组 `screenshot unique FAIL` 出现得更稳定。
+
+**ehr 2026-06 audit round 3 reference**:`report-user-manual.md` 的 4 组同字节不同文件名引用(例如 `report-list-{toolbar, status-filter}.png` SHA `3d46a9025a23` 完全一致)是这种**"录屏脚本同一画面连拍 N 张、markdown 给每张起不同名 + 写不同 alt、但 disk 上字节相同"**的失败模式。`screenshot unique` check v1.1.0+ 默认就报。修法:改 `recorder-scripts/record_real.py` — 拍完 `await page.screenshot()` 后对 PNG bytes 算 SHA,跟已存的 SHA 比对,跳过相同字节的(或者改 markdown 引用,只用一个文件名 + 写好 alt)。
+
+**`screenshot_uses_annotated` 没改**:这个 check 已经有 `--annotated-relaxed` opt-out(老 test 用了),保留它避免破坏 `--annotated-relaxed` 兼容路径。语义 v1.1.0 起就是"alt 文案说 '红框/箭头/...',但 image 是无标注的裸 PNG,有 annotated 兄弟 → 默认 FAIL",不变。
+
+

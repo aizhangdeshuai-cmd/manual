@@ -48,6 +48,18 @@ v1.2.0 — added two post-gate checks: `manifest_disk_consistency` (manifest
  asset inventory must match disk state; FAIL on manifest-only paths) and
  `file_type_sanity` (catch the 'manual.md is actually HTML' failure
  mode that bypassed v1.1.0 in the 2026-06 ehr audit).
+v1.3.0 — internal cleanup: `screenshot unique` is now unconditionally
+ on by default; the only opt-out is `--no-unique`. The check
+ semantics are unchanged from v1.1.0 (already default-on); this
+ release just makes the inverted-polarity flag name explicit
+ (`UNIQUE_CHECK_SKIP` instead of `UNIQUE_CHECK_ENABLED`) so the
+ call site reads naturally. Behaviour: `validate-output.py <file>`
+ without flags runs the check. `validate-output.py --no-unique
+ <file>` skips it. ehr 2026-06 audit round 3 reference: the 4
+ groups of byte-identical screenshots (e.g. report-list-{toolbar,
+ status-filter}.png) are now caught by the v1.1.0 default and
+ reported as `screenshot unique (no duplicate content) FAIL`
+ without any flag.
  The gate reads `docs/user-manual/recording_manifest.json` (written by the
  recorder skill via `manual_helper write-recording-manifest`). Without that
  file (or with a manifest that says dev server was unreachable, or recorder
@@ -1710,9 +1722,10 @@ def validate_file(path):
         "detail": fts_check.get("detail", ""),
     })
     all_ok = all_ok and fts_check["ok"]
-    # v0.4.0: opt-in unique-content check. Pop a module-level flag
-    # (set by main from --unique) so test harnesses can override.
-    if globals().get("UNIQUE_CHECK_ENABLED"):
+    # v1.3.0 cleanup: --no-unique is the ONLY opt-out. The check
+    # is on by default (since v1.1.0). Flag is named UNIQUE_CHECK_SKIP
+    # to make the inverted polarity explicit at the call site.
+    if not globals().get("UNIQUE_CHECK_SKIP", False):
         unique_check = _check_screenshot_unique(
             path, text, allow_paths=globals().get("UNIQUE_CHECK_ALLOW", set())
         )
@@ -1870,7 +1883,7 @@ def main(argv):
     hard_gate_disabled = "--no-hard-gate" in args
     args = [a for a in args if not a.startswith("--")]
     # Stash on module globals so validate_file can pick up.
-    globals()["UNIQUE_CHECK_ENABLED"] = unique
+    globals()["UNIQUE_CHECK_SKIP"] = not unique  # v1.3.0: invert polarity
     globals()["UNIQUE_CHECK_ALLOW"] = unique_allow
     globals()["ANNOTATED_RELAXED"] = annotated_relaxed
     globals()["HARD_GATE_DISABLED"] = hard_gate_disabled
