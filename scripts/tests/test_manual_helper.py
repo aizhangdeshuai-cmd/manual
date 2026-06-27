@@ -674,3 +674,129 @@ class WriteRecordingManifestTests(unittest.TestCase):
             )
             self.assertEqual(r.returncode, 2)
             self.assertIn("does not exist", r.stderr)
+
+
+
+# v1.4.0: regenerate_standalone_if_stale — rebuild the inlined
+# standalone HTML only when stale. Three staleness signals:
+#   1. wrapper template version < bundled template
+#   2. any source .md newer than the inlined HTML
+#   3. the inlined <script> blocks lack data-title (v2.3.1+ contract)
+class RegenerateStandaloneIfStaleTests(unittest.TestCase):
+    """v1.4.0: HTML viewer template upgrade path.
+
+    The ehr 2026-06 standalone HTML was built BEFORE v2.3.1 added
+    `data-title` to inline <script> blocks. The wrapper template
+    was up-to-date (v25 marker matches bundled), but the inlined
+    body lacked data-title. Dashboard cards showed `user-manual.md`
+    instead of the Chinese title.
+
+    This test pins the contract: the inlined_stale signal
+    forces a rebuild even when wrapper version is current.
+    """
+
+    def _setup(self, tmp, *, with_data_title=True, wrapper_version=25):
+        out = tmp / "standalone.html"
+        # minimal HTML that has the wrapper version marker and an
+        # inlined <script> block (with or without data-title)
+        data_title_attr = ' data-title="X"' if with_data_title else ""
+        body = f"""<!doctype html>
+<html><head>
+<!-- user-manual-dashboard-version: {wrapper_version} -->
+</head>
+<body>
+<script type="text/markdown" data-file="a.md"{data_title_attr} id="md-a">
+# A
+</script>
+</body></html>"""
+        out.write_text(body, encoding="utf-8")
+        md = tmp / "a.md"
+        md.write_text("# A\n", encoding="utf-8")
+        return out, md
+
+    def test_creates_when_missing(self):
+        from manual_helper.html import regenerate_standalone_if_stale
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            md = tmp / "a.md"
+            md.write_text("---\ntitle: A\n---\n# A\n", encoding="utf-8")
+            out = tmp / "out.html"
+            r = regenerate_standalone_if_stale(out, [md])
+            self.assertEqual(r, "created")
+            self.assertTrue(out.exists())
+            # The inlined block must carry data-title (current contract)
+            text = out.read_text(encoding="utf-8")
+            self.assertIn('data-title="', text)
+
+    def test_unchanged_when_fresh(self):
+        from manual_helper.html import regenerate_standalone_if_stale
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            out, md = self._setup(tmp, with_data_title=True, wrapper_version=25)
+            # Make md OLDER than HTML so md_stale=False
+            import os, time
+            t_old = time.time() - 60
+            os.utime(md, (t_old, t_old))
+            os.utime(out, (time.time(), time.time()))
+            r = regenerate_standalone_if_stale(out, [md])
+            self.assertEqual(r, "unchanged")
+
+    def test_inlined_no_data_title_triggers_rebuild(self):
+        """v1.3.1 fix: pre-upgrade builds lack data-title; force
+        rebuild even when wrapper version is current."""
+        from manual_helper.html import regenerate_standalone_if_stale
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            out, md = self._setup(tmp, with_data_title=False, wrapper_version=25)
+            # Make md older than HTML so md_stale=False
+            import os, time
+            t_old = time.time() - 60
+            os.utime(md, (t_old, t_old))
+            os.utime(out, (time.time(), time.time()))
+            r = regenerate_standalone_if_stale(out, [md])
+            self.assertIn("regenerated", r)
+            self.assertIn("data-title", r)
+            # After rebuild, data-title should be present
+            text = out.read_text(encoding="utf-8")
+            self.assertIn('data-title="', text)
+
+    def test_md_newer_than_html_triggers_rebuild(self):
+        from manual_helper.html import regenerate_standalone_if_stale
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            out, md = self._setup(tmp, with_data_title=True, wrapper_version=25)
+            # Make md NEWER than HTML so md_stale=True
+            import os, time
+            t_new = time.time() + 60
+            os.utime(md, (t_new, t_new))
+            os.utime(out, (time.time(), time.time()))
+            r = regenerate_standalone_if_stale(out, [md])
+            self.assertIn("regenerated", r)
+            self.assertIn(".md newer", r)
+
+    def test_wrapper_stale_triggers_rebuild(self):
+        from manual_helper.html import regenerate_standalone_if_stale
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            out, md = self._setup(tmp, with_data_title=True, wrapper_version=10)  # old wrapper
+            import os, time
+            t_old = time.time() - 60
+            os.utime(md, (t_old, t_old))
+            os.utime(out, (time.time(), time.time()))
+            r = regenerate_standalone_if_stale(out, [md])
+            self.assertIn("regenerated", r)
+            self.assertIn("wrapper", r)
+
+    def test_cli_subcommand_rebuilds(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            out, md = self._setup(tmp, with_data_title=False, wrapper_version=25)
+            import os, time
+            t_old = time.time() - 60
+            os.utime(md, (t_old, t_old))
+            os.utime(out, (time.time(), time.time()))
+            r = run_module(
+                "regenerate-standalone-if-stale", str(out), str(md),
+            )
+            self.assertEqual(r.returncode, 0, msg=r.stderr)
+            self.assertIn("regenerated", r.stdout)

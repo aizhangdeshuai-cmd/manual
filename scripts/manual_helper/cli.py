@@ -46,6 +46,7 @@ _cmd_fill_citation_shas = _artifacts._cmd_fill_citation_shas
 html_template_version = _html.html_template_version
 html_on_disk_version = _html.html_on_disk_version
 regenerate_html_if_stale = _html.regenerate_html_if_stale
+regenerate_standalone_if_stale = _html.regenerate_standalone_if_stale
 build_standalone = _html.build_standalone
 write_index = _html.write_index
 cmd_extract_tasks = _extract.cmd_extract_tasks
@@ -338,6 +339,28 @@ def main(argv: list[str]) -> int:
         md_paths = [Path(p) for p in argv[4:]]
         result = build_standalone(tmpl, out, md_paths)
         print(f"wrote: {result}")
+        return 0
+
+    if cmd == "regenerate-standalone-if-stale":
+        # v1.4.0: rebuild the inlined standalone HTML only if stale.
+        # Detects 3 staleness signals:
+        #   1. wrapper template version is older than bundled template
+        #   2. any source .md has been modified after the inlined HTML
+        #   3. the inlined <script> blocks lack data-title
+        #      (v2.3.1 viewer fix; pre-upgrade builds need rebuilding
+        #      even if the wrapper version is up to date)
+        #
+        # Usage: manual_helper.py regenerate-standalone-if-stale <html-out> <md-path> [more...]
+        if len(argv) < 4:
+            print(
+                "usage: manual_helper.py regenerate-standalone-if-stale <html-out> <md-path> [more...]",
+                file=sys.stderr,
+            )
+            return 2
+        out = Path(argv[2])
+        md_paths = [Path(p) for p in argv[3:]]
+        result = regenerate_standalone_if_stale(out, md_paths)
+        print(f"{result}: {out}")
         return 0
 
     if cmd == "auto-promote-annotated":

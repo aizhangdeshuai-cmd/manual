@@ -81,6 +81,7 @@ from .html import (
     html_template_version,
     html_on_disk_version,
     regenerate_html_if_stale,
+    regenerate_standalone_if_stale,
     build_standalone,
     write_index,
     _parse_frontmatter,
@@ -159,7 +160,7 @@ __all__ = [
     "_short_hash", "_extract_title", "_infer_project_root",
     # html
     "html_template_version", "html_on_disk_version", "regenerate_html_if_stale",
-    "build_standalone", "write_index",
+    "regenerate_standalone_if_stale", "build_standalone", "write_index",
     "_parse_frontmatter", "_extract_title_from_md", "_read_html_version",
     "_slugify_for_id", "_convert_video_links_to_html", "_inline_assets_to_data_urls",
     # extract

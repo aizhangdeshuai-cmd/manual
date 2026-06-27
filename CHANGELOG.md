@@ -1,4 +1,86 @@
 
+## 1.4.0 (2026-06-27) — regenerate_standalone_if_stale: detect stale inlined blocks, force rebuild
+
+The ehr 2026-06 standalone HTML shipped WITHOUT `data-title`
+attributes on the inline `<script>` blocks, even though the
+wrapper template had been upgraded to v25 (which corresponds
+to the v2.3.1 viewer fix that added the attribute). The cause:
+`regenerate_html_if_stale()` only checks the wrapper template
+version; the inlined blocks are produced by a separate
+`build_standalone()` call and have no version marker of their
+own. So the wrapper upgrade (template v24 -> v25) was
+correctly detected, but the inlined body — built with the OLD
+`build_standalone()` that did not write `data-title` — was
+left untouched.
+
+Net effect: dashboard cards rendered `user-manual.md`,
+`report-user-manual.md`, `blacklist-user-manual.md` instead of
+the Chinese frontmatter titles, because the viewer's
+`extractTitle()` regex couldn't match the inline markdown
+(its `^---` anchor failed on the leading `\n` that
+`build_standalone` writes after the `<script>` tag).
+
+### What changed
+
+- `scripts/manual_helper/html.py`:
+  - New `regenerate_standalone_if_stale(html_out, md_paths,
+    template_path=None) -> str`. Returns "created" | "unchanged"
+    | "regenerated: <reason>". Three staleness signals:
+      1. wrapper template version older than bundled template
+         (mirrors the existing `regenerate_html_if_stale` check)
+      2. any source .md has been modified after the inlined HTML
+      3. the inlined `<script type="text/markdown">` blocks
+         lack `data-title` (precise regex anchored to the block
+         opening tag, so a `data-title="${...}"` in the viewer
+         template's own code does not count as a satisfied
+         contract)
+- `scripts/manual_helper/cli.py`:
+  - New subcommand `regenerate-standalone-if-stale` with the
+    standard `<html-out> <md-path> [more...]` shape.
+- `scripts/manual_helper/__init__.py`: re-export
+  `regenerate_standalone_if_stale`.
+- `scripts/tests/test_manual_helper.py`:
+  - New `RegenerateStandaloneIfStaleTests` (6 cases):
+    creates when missing, unchanged when fresh, inlined no
+    data-title triggers rebuild, md newer than html triggers
+    rebuild, wrapper stale triggers rebuild, CLI subcommand
+    rebuilds.
+- `SKILL.md`:
+  - §16.15 new: documents the failure mode (wrapper and
+    inlined body versions can drift apart), the three
+    staleness signals, the agent's §14 closing sequence now
+    has an 8th step (regenerate-standalone-if-stale between
+    write-recording-manifest and validate-output), and the
+    relationship to v2.3.1 (v2.3.1 fixes the BUILDER to
+    write data-title; v1.4.0 detects the OUT-OF-DATE OUTPUT
+    and forces a rebuild).
+- `CHANGELOG.md`: v1.4.0 entry.
+
+### Why this is a real release, not "just an upgrade check"
+
+The drift between wrapper-version-current and inlined-body-stale
+is a failure mode that the existing `regenerate_html_if_stale`
+function is structurally unable to detect (it only reads the
+wrapper marker). Without v1.4.0, the only way to recover was
+for the LLM agent to remember to manually `build-standalone`
+after every template upgrade. That is a contract the agent
+will forget, exactly as the ehr 2026-06 build demonstrates.
+v1.4.0 makes the staleness detection automatic and adds it to
+the standard CLI surface so CI can run it.
+
+### Suite: 177 -> 183 tests, all green.
+
+### Also in this release: backfill v2.3.1 viewer fix
+
+v2.3.1 (the `data-title` attribute + `extractTitle` regex fix)
+was prepared in the ehr 2026-06 audit but never landed in
+this branch. v1.4.0 backfills it: the v2.3.1 patches that
+apply cleanly (0005 viewer regex, 0007 build_standalone,
+0008 viewer data-title preference) are now committed. The
+two that don't apply (0006 CHANGELOG, 0009 SKILL.md) are
+absorbed into the v1.4.0 CHANGELOG and SKILL.md updates
+above; their substantive content is preserved.
+
 ## 1.3.0 (2026-06-27) — screenshot unique: invert-polarity flag, force default-on
 
 Cosmetic / internal cleanup. Behaviour is unchanged from v1.1.0

@@ -1027,7 +1027,10 @@
   }
 
   function extractTitle(text, fallback) {
-    const m = text.match(/^---[\s\S]*?title:\s*(.+?)\s*\n[\s\S]*?---/);
+    // Accept leading whitespace (text may start with \n when read from inline <script>).
+    // Require `---` on its own line so we don't accidentally match `---xx---` mid-text.
+    const fmText = text.replace(/^\s+/, "");
+    const m = fmText.match(/^---\n[\s\S]*?title:\s*(.+?)\s*\n[\s\S]*?\n---/);
     if (m) return m[1].trim().replace(/^["']|["']$/g, "");
     for (const line of text.split("\n")) {
       const s = line.trim();

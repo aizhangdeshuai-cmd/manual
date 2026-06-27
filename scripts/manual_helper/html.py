@@ -68,6 +68,80 @@ def regenerate_html_if_stale(html_path: Path) -> str:
     return "unchanged"
 
 
+def regenerate_standalone_if_stale(
+    html_out_path: Path,
+    md_paths: list[Path],
+    *,
+    template_path: Path | None = None,
+) -> str:
+    """v1.4.0: rebuild the inlined standalone HTML when any of these change:
+      1. The bundled template version is newer than what was last inlined
+         (marker in <!-- INLINE: standalone build, do not edit by hand -->).
+      2. Any source .md has been modified after the inlined HTML.
+      3. The inlined HTML is missing.
+
+    v1.3.1 fix: previously the viewer template's `extractTitle()` regex
+    couldn't match the inline markdown because the leading `<script>` tag
+    in build_standalone wrote a newline before the YAML frontmatter
+    (`text.startsWith("---")` was always false; title fell through to
+    filename). v2.3.1 fixed this by writing a `data-title` attribute on
+    each inline `<script>` block. But ehr 2026-06 ships a standalone
+    HTML built BEFORE that fix — the inlined blocks have no
+    `data-title`, so dashboard cards show `user-manual.md` instead of
+    the Chinese frontmatter title. The wrapper template's version
+    marker is the NEW version (because the wrapper is regenerated
+    separately), but the inlined body is STALE.
+
+    The fix: this function checks the inlined HTML for the data-title
+    attribute as a staleness signal. If absent, force a rebuild
+    regardless of the wrapper version.
+    """
+    if template_path is None:
+        template_path = TEMPLATE_HTML_PATH
+    template_version = html_template_version()
+    html_out_path.parent.mkdir(parents=True, exist_ok=True)
+    if not html_out_path.exists():
+        build_standalone(template_path, html_out_path, md_paths)
+        return "created"
+    on_disk = html_out_path.read_text(encoding="utf-8")
+    # Stale if the wrapper version is older than the template.
+    wrapper_version = _read_html_version(on_disk)
+    wrapper_stale = (
+        wrapper_version is None or wrapper_version < template_version
+    )
+    # Stale if any source .md is newer than the inlined HTML.
+    inlined_mtime = html_out_path.stat().st_mtime
+    md_stale = False
+    for p in md_paths:
+        if p.exists() and p.stat().st_mtime > inlined_mtime:
+            md_stale = True
+            break
+    # v1.3.1: stale if the inlined <script type="text/markdown"> blocks
+    # lack `data-title` (the viewer template was upgraded to write it;
+    # pre-upgrade builds produced inlined blocks WITHOUT it, and the
+    # wrapper template alone can't recover because the data lives in
+    # the inlined <script>, not the wrapper). We use a regex anchored
+    # to the inline block opening tag — a stray `data-title="${...}"`
+    # in the viewer template's own code (e.g. the dashboard card render)
+    # should NOT count as a satisfied contract.
+    import re as _re
+    inlined_stale = not _re.search(
+        r'<script type="text/markdown"[^>]*\bdata-title="',
+        on_disk,
+    )
+    if wrapper_stale or md_stale or inlined_stale:
+        build_standalone(template_path, html_out_path, md_paths)
+        reasons = []
+        if wrapper_stale:
+            reasons.append(f"wrapper v{wrapper_version} < template v{template_version}")
+        if md_stale:
+            reasons.append("source .md newer than inlined HTML")
+        if inlined_stale:
+            reasons.append("inlined <script> blocks lack data-title (v1.3.1+ viewer fix not yet inlined)")
+        return "regenerated: " + "; ".join(reasons)
+    return "unchanged"
+
+
 # ---------- CLI ----------
 
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -282,6 +356,37 @@ def _inline_assets_to_data_urls(text, md_path):
     return text
 
 
+
+
+
+def _extract_title_from_markdown(text: str) -> str:
+    """v2.3.1: pull the title out of a markdown file's YAML frontmatter.
+
+    Used by `build_standalone()` to write a `data-title` attribute on the
+    inline `<script type="text/markdown">` block, so the viewer can show
+    the Chinese title in dashboard cards without re-running its own regex
+    over `textContent` (which starts with a leading \n after
+    build-standalone writes the opening `<script>` tag, breaking
+    `extractTitle()`'s `^---` anchor).
+
+    Falls back to first H1, then to empty string.
+    Never returns the filename — that's the viewer's job, not ours.
+    """
+    import re as _re
+    t = text.lstrip()
+    m = _re.match(r"^---\s*\n([\s\S]*?)\n---", t)
+    if m:
+        for line in m.group(1).split("\n"):
+            line = line.strip()
+            if line.startswith("title:"):
+                return line[len("title:"):].strip().strip('"').strip("'")
+    for line in t.split("\n"):
+        s = line.strip()
+        if s.startswith("# "):
+            return s[2:].strip()
+    return ""
+
+
 def build_standalone(html_template_path: Path, html_out_path: Path, md_paths: list[Path]) -> Path:
     """Read the html template, inline all .md files as <script> blocks, write out.
 
@@ -326,8 +431,12 @@ def build_standalone(html_template_path: Path, html_out_path: Path, md_paths: li
         text = text.replace("</script>", "<\\/script>")
         sid = _slugify_for_id(p.name)
         rel = p.name  # already relative to html dir (caller responsibility)
+        # v2.3.1: pre-extract the title so the viewer doesn't have to
+        # regex over the inlined textContent. See _extract_title_from_markdown.
+        title = _extract_title_from_markdown(text)
+        title_attr = f' data-title="{title}"' if title else ""
         inline_blocks.append(
-            f'<script type="text/markdown" data-file="{rel}" id="md-{sid}">\n'
+            f'<script type="text/markdown" data-file="{rel}" id="md-{sid}"{title_attr}>\n'
             f'{text}\n'
             f'</script>'
         )

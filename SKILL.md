@@ -1431,3 +1431,27 @@ v1.3.0 清理:
 **`screenshot_uses_annotated` 没改**:这个 check 已经有 `--annotated-relaxed` opt-out(老 test 用了),保留它避免破坏 `--annotated-relaxed` 兼容路径。语义 v1.1.0 起就是"alt 文案说 '红框/箭头/...',但 image 是无标注的裸 PNG,有 annotated 兄弟 → 默认 FAIL",不变。
 
 
+### 16.15 v1.4.0 — regenerate_standalone_if_stale: 解决 "viewer 升级但 HTML 没 rebuild" (ehr 2026-06 真坑)
+
+**问题**: ehr 2026-06 standalone HTML (7.0MB) 是 14:05 build 的,viewer template 在 14:05 之后 v2.3.1 升级 (改了 `extractTitle()` regex + 加 `data-title` attribute)。但因为 `init-skill` 触发 `regenerate_html_if_stale()` 只覆盖 `user-manual.html` (wrapper),**不**覆盖 `user-manual-standalone.html` (inlined 全部分册),所以 inlined 块没有 `data-title` 属性,viewer 启动后 dashboard cards 显示 `user-manual.md` / `report-user-manual.md` / `blacklist-user-manual.md` 而不是中文 frontmatter title。
+
+**为什么 `regenerate_html_if_stale()` 没 catch**:它比 wrapper `<!-- user-manual-dashboard-version: N -->` 跟 bundled template 的 version,模板从 24 → 25 wrapper 升了,但 inlined 块的构建逻辑是 `build_standalone()` 不带 version marker。Wrapper 是新版本,body 是旧版本 — `regenerate_html_if_stale` 看 wrapper version 满意就 `unchanged`。**wrapper 和 inlined 块的版本可以脱钩** — 这是 ehr 2026-06 的精确失败模式。
+
+**v1.4.0 修法**: 新 `regenerate_standalone_if_stale(html_out, md_paths)` 函数,3 个 staleness 信号:
+
+1. **wrapper stale**: 跟原来一样,`wrapper_version < template_version`
+2. **md stale**: 任何源 `.md` 文件的 mtime > inlined HTML 的 mtime(源文件比 build 产物新)
+3. **inlined stale**: 精确 regex 锚到 `<script type="text/markdown"` 块看是否有 `data-title="` — 这个 regex 不会被 viewer template 自己代码里的 `data-title="\${...}"` 假阳性触发
+
+任一 stale → 重新 `build_standalone()`。3 个信号都通过 → `unchanged`。CLI 入口:`python3 -m manual_helper regenerate-standalone-if-stale <html-out> <md-path> [more...]`。
+
+**使用时机** (LLM agent 跑完 §14 之后): 跑 `init-skill` 会自动调 `regenerate_html_if_stale`(wrapper),但**不**会触发 standalone rebuild。手动跑 `regenerate-standalone-if-stale` 是 LLM agent 在 §14 + §5.3 收尾的**第 8 步**(排在 §16.11 第 6 步 `write-recording-manifest` 之后、§5.4 跑 validate 之前)。CI 也可以加这个调用,让 PR merge 后自动 rebuild。
+
+**测试**: 6 个新 case (test_creates_when_missing / test_unchanged_when_fresh / test_inlined_no_data_title_triggers_rebuild / test_md_newer_than_html_triggers_rebuild / test_wrapper_stale_triggers_rebuild / test_cli_subcommand_rebuilds)。
+
+**跟 v2.3.1 viewer fix 的关系**: v2.3.1 修了 build_standalone + viewer regex (让 data-title 出现在 inline 块里 + 让 extractTitle regex 接受前导空白)。v1.4.0 是**检测机制** — 让 stale 的产物自动 rebuild,而不靠人记着手动 `build-standalone`。没有 v1.4.0,v2.3.1 的修复对新项目生效、对**已有 ehr 这种 shipped-product 不生效**(因为没人 rebuild 它)。两个 release 协同:v2.3.1 是"新 build 会带 data-title",v1.4.0 是"检测到旧 build 缺 data-title 就 rebuild"。
+
+**未修的相关问题** (留给 v1.5.x): 录屏脚本 `recorder-scripts/record_real.py` 同画面连拍 N 张导致 4 组 dup PNG (报告里 `screenshot unique (no duplicate content)` FAIL) — 这是**脚本侧**问题,不在 skill validator 范围。SKILL.md §14 可以加小贴士"录完跑 `validate-output.py --unique`,删 SHA 相同的 PNG",但不改 validator。
+
+
+
